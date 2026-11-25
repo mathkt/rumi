@@ -260,6 +260,33 @@ const server = http.createServer((req, res) => {
     assert.ok((await view(B.page)).hand.length >= 10);
   });
 
+
+  await ok('대기실에서 🤖 컴퓨터 넣기 → 시작 → 컴퓨터가 두고 내 차례로 돌아옴', async () => {
+    const D = await newUser('혼자방장');
+    await D.page.fill('#in-name', '혼자');
+    await D.page.click('[data-tab="create"]');
+    await D.page.selectOption('#cs-players', '3');
+    await D.page.selectOption('#cs-aiLevel', '1');
+    await D.page.click('#btn-create');
+    await D.page.waitForSelector('#s-lobby:not(.hidden)');
+    await D.page.click('[data-bot="1"]');
+    await D.page.waitForFunction(() => document.querySelector('#lb-seats').textContent.includes('🤖 컴퓨터2'));
+    assert.ok(await D.page.locator('#lb-start').isDisabled());
+    await D.page.click('[data-bot="2"]');
+    await D.page.waitForFunction(() => !document.querySelector('#lb-start').disabled);
+    assert.ok((await D.page.locator('#lb-summary').textContent()).includes('쉬움'));
+    await D.page.screenshot({ path: OUT + '/13-lobby-bots.png' });
+    await D.page.click('#lb-start');
+    await D.page.waitForSelector('#s-game:not(.hidden)');
+    // 시작 차례가 누구든, 컴퓨터 차례는 자동으로 지나가서 결국 내 차례가 온다
+    await D.page.waitForFunction(() => window.__app.view.game.turn === window.__app.view.mySeat, null, { timeout: 15000 });
+    await D.page.click('#b-draw');
+    await D.page.waitForFunction(() => document.querySelector('#g-turn').textContent.includes('생각 중'), null, { timeout: 5000 });
+    const seq = await D.page.evaluate(() => window.__app.view.game.seq);
+    await D.page.waitForFunction(() => window.__app.view.game.turn === window.__app.view.mySeat, null, { timeout: 15000 });
+    const seq2 = await D.page.evaluate(() => window.__app.view.game.seq);
+    assert.strictEqual(seq2, seq + 2);
+  });
   await browser.close();
   server.close();
   results.forEach((r) => console.log(r[0], r[1]));

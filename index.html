@@ -111,7 +111,9 @@ h3{margin:0 0 8px}
 .seat{display:flex;align-items:center;gap:8px;background:var(--panel);border-radius:10px;padding:8px 10px;margin:5px 0}
 .seat .dot{width:10px;height:10px;border-radius:50%;background:var(--ok)}
 .seat.off .dot{background:#888}
-.seat.empty{opacity:.5;border:2px dashed rgba(255,255,255,.3);background:transparent}
+.seat.empty{border:2px dashed rgba(255,255,255,.3);background:transparent}
+.seat.empty .nm{opacity:.55}
+.seat.bot{background:#28405a}
 .seat .nm{flex:1;font-weight:700}
 .big{font-size:44px;font-weight:900;letter-spacing:6px;color:var(--accent)}
 .sum{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:14px}
@@ -165,7 +167,7 @@ h3{margin:0 0 8px}
     </div>
 
     <div id="tab-local" class="panel hidden">
-      <p class="hint">인터넷 없이 한 화면에서 번갈아 해 보는 연습 모드예요. 1명이면 혼자 연습할 수 있어요. 차례가 바뀔 때마다 화면이 가려져서 서로의 패를 볼 수 없어요.</p>
+      <p class="hint">인터넷 없이 한 화면에서 하는 연습 모드예요. <b>컴퓨터</b>와 겨뤄 보거나, 친구와 번갈아 할 수 있어요(사람이 2명 이상이면 차례마다 화면이 가려져요).</p>
       <div id="local-settings"></div>
       <button class="primary" id="btn-local">연습 시작</button>
     </div>
@@ -225,6 +227,7 @@ h3{margin:0 0 8px}
       <button id="b-sortc" class="ghost">색 정렬</button>
       <button id="b-sortn" class="ghost">숫자 정렬</button>
       <button id="b-force" class="danger hidden">끊긴 사람 넘기기</button>
+      <button id="b-ai" class="danger hidden">🤖 끊긴 자리 컴퓨터로</button>
     </div>
     <div id="rack" class="rack"></div>
   </div>
@@ -711,6 +714,251 @@ window.FIREBASE_CONFIG = {
 });
 </script>
 <script>/*!
+ * 루미큐브 컴퓨터 플레이어 (rk-ai.js)
+ * - 자기 패와 테이블만 보고 둔다(다른 사람의 패·더미 순서는 보지 않음).
+ * - 결과는 항상 규칙 엔진(validateTurn)을 통과한 수만 돌려준다. 낼 수 없으면 null(= 뽑고 넘기기).
+ * 난이도 level: 1 쉬움 / 2 보통 / 3 어려움
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./rk-engine.js'));
+  else root.RKAI = factory(root.RK);
+})(typeof self !== 'undefined' ? self : this, function (RK) {
+  'use strict';
+  const { isJoker, colorOf, numOf, validateSet, validateTurn, arrangeSet } = RK;
+  const JOKERS = [104, 105];
+  const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+
+  /** 주어진 타일로 만들 수 있는 세트 후보: {real:[id], jokers:n, size, pts} (조커는 개수로만 셈) */
+  function genCandidates(tiles, jokerCount) {
+    const J = jokerCount;
+    const byCN = new Map();
+    for (const id of tiles) {
+      if (isJoker(id)) continue;
+      const k = colorOf(id) * 13 + numOf(id) - 1;
+      if (!byCN.has(k)) byCN.set(k, []);
+      byCN.get(k).push(id);
+    }
+    const out = [];
+    const add = (real, jk) => {
+      const set = arrangeSet(real.concat(JOKERS.slice(0, jk)));
+      const v = validateSet(set);
+      if (v.valid) out.push({ real, jokers: jk, size: real.length + jk, pts: v.points });
+    };
+    // 그룹
+    for (let n = 1; n <= 13; n++) {
+      const reals = [];
+      for (let c = 0; c < 4; c++) {
+        const a = byCN.get(c * 13 + n - 1);
+        if (a) reals.push(a[0]);
+      }
+      const m = reals.length;
+      for (let mask = 1; mask < 1 << m; mask++) {
+        const sub = reals.filter((_, i) => mask & (1 << i));
+        if (sub.length < 2) continue;
+        for (let jk = 0; jk <= Math.min(J, 4 - sub.length); jk++) if (sub.length + jk >= 3) add(sub, jk);
+      }
+    }
+    // 런
+    for (let c = 0; c < 4; c++) {
+      for (let s = 1; s <= 11; s++) {
+        const reals = [];
+        let missing = 0;
+        for (let e = s; e <= 13; e++) {
+          const a = byCN.get(c * 13 + e - 1);
+          if (a) reals.push(a[0]);
+          else missing++;
+          if (missing > J) break;
+          if (e - s + 1 >= 3 && reals.length >= 2) add(reals.slice(), missing);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 패만으로 만들 수 있는 가장 좋은 세트 묶음.
+   * 목표: 점수가 minPoints 이상인 묶음 중 타일을 가장 많이 쓰는 것(동점이면 점수가 높은 것).
+   * 반환: 세트 배열(조커 id 배정 완료) 또는 null
+   */
+  function bestMelds(hand, minPoints, maxNodes, deadline) {
+    const jokerIds = hand.filter(isJoker);
+    const reals = hand.filter((id) => !isJoker(id));
+    const cands = genCandidates(reals, jokerIds.length).sort((a, b) => b.size - a.size || b.pts - a.pts);
+    let best = null;
+    let bestTiles = 0;
+    let bestPts = -1;
+    let nodes = 0;
+    const used = new Set();
+    const chosen = [];
+    const total = hand.length;
+    (function dfs(i, jokersLeft, tiles, pts) {
+      if (pts >= minPoints && tiles > 0 && (tiles > bestTiles || (tiles === bestTiles && pts > bestPts))) {
+        best = chosen.slice();
+        bestTiles = tiles;
+        bestPts = pts;
+      }
+      if (++nodes > maxNodes || (deadline && now() > deadline)) return;
+      if (tiles + (total - tiles - (jokerIds.length - jokersLeft) * 0) <= bestTiles && pts >= minPoints) {
+        // 남은 타일을 모두 써도 지금 최선보다 많아질 수 없으면 그만
+        const remaining = reals.filter((id) => !used.has(id)).length + jokersLeft;
+        if (tiles + remaining <= bestTiles) return;
+      }
+      for (let k = i; k < cands.length; k++) {
+        const c = cands[k];
+        if (c.jokers > jokersLeft) continue;
+        if (c.real.some((id) => used.has(id))) continue;
+        c.real.forEach((id) => used.add(id));
+        chosen.push(c);
+        dfs(k + 1, jokersLeft - c.jokers, tiles + c.size, pts + c.pts);
+        chosen.pop();
+        c.real.forEach((id) => used.delete(id));
+        if (nodes > maxNodes) return;
+      }
+    })(0, jokerIds.length, 0, 0);
+    if (!best) return null;
+    const js = jokerIds.slice();
+    return best.map((c) => arrangeSet(c.real.concat(js.splice(0, c.jokers))));
+  }
+
+  /** 패의 타일을 테이블 세트에 이어 붙이기(런 늘리기, 그룹 채우기). 조커는 패를 다 비울 수 있을 때만 */
+  function extendSets(table, hand) {
+    let t = table.map((s) => s.slice());
+    let h = hand.slice();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const order = h.filter((id) => !isJoker(id)).concat(h.filter(isJoker));
+      for (const id of order) {
+        if (isJoker(id) && h.some((x) => !isJoker(x))) continue;
+        for (let i = 0; i < t.length; i++) {
+          const ns = arrangeSet(t[i].concat([id]));
+          if (validateSet(ns).valid) {
+            t[i] = ns;
+            h = h.filter((x) => x !== id);
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    return { table: t, hand: h };
+  }
+
+  /**
+   * 어려움: 테이블 전체를 다시 짜서 패의 타일을 더 많이 쓰는 배치를 찾는다(시간 제한 안에서).
+   */
+  function rearrange(table, hand, deadline) {
+    const tableTiles = table.reduce((a, s) => a.concat(s), []);
+    const reqReal = tableTiles.filter((id) => !isJoker(id));
+    const tableJokers = tableTiles.filter(isJoker);
+    const handJokers = hand.filter(isJoker);
+    const allJokers = tableJokers.concat(handJokers);
+    const handReal = hand.filter((id) => !isJoker(id));
+    const reqSet = new Set(reqReal);
+    let best = null;
+    let bestUsed = 0;
+    const avail = new Set(reqReal.concat(handReal));
+    const chosen = [];
+    let nodes = 0;
+
+    function finish(jokersUsed) {
+      if (jokersUsed < tableJokers.length) return;
+      const js = allJokers.slice(); // 테이블 조커를 먼저 배정
+      const sets = chosen.map((c) => arrangeSet(c.real.concat(js.splice(0, c.jokers))));
+      const restHand = handReal.filter((id) => avail.has(id)).concat(js); // 남은 조커는 패의 조커
+      const melds = bestMelds(restHand, 0, 400, deadline) || [];
+      const meldIds = new Set(melds.reduce((a, s) => a.concat(s), []));
+      const ext = extendSets(sets.concat(melds), restHand.filter((id) => !meldIds.has(id)));
+      const usedCount = hand.length - ext.hand.length;
+      if (usedCount > bestUsed) {
+        bestUsed = usedCount;
+        best = ext;
+      }
+    }
+    (function cover(jokersUsed) {
+      if (++nodes > 6000 || now() > deadline) return;
+      let t = -1;
+      for (const id of reqReal) if (avail.has(id)) { t = id; break; }
+      if (t < 0) { finish(jokersUsed); return; }
+      const pool = [...avail].sort((a, b) => (reqSet.has(b) ? 1 : 0) - (reqSet.has(a) ? 1 : 0));
+      const cN = colorOf(t) * 13 + numOf(t);
+      const cands = genCandidates(pool, allJokers.length - jokersUsed)
+        .map((c) => {
+          const k = c.real.findIndex((id) => colorOf(id) * 13 + numOf(id) === cN);
+          if (k < 0) return null;
+          const real = c.real.slice();
+          real[k] = t;
+          return { real, jokers: c.jokers, size: c.size };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.jokers - b.jokers || b.real.filter((id) => !reqSet.has(id)).length - a.real.filter((id) => !reqSet.has(id)).length);
+      for (const c of cands) {
+        if (c.real.some((id) => !avail.has(id))) continue;
+        c.real.forEach((id) => avail.delete(id));
+        chosen.push(c);
+        cover(jokersUsed + c.jokers);
+        chosen.pop();
+        c.real.forEach((id) => avail.add(id));
+        if (nodes > 6000 || now() > deadline) return;
+      }
+    })(0);
+    return best;
+  }
+
+  /**
+   * 한 차례의 수를 고른다.
+   * p = {table, hand, melded, minMeld, level, rng}
+   * 반환: {table, hand} (규칙 통과 보장) 또는 null(뽑고 넘기기)
+   */
+  function chooseMove(p) {
+    const level = p.level || 2;
+    const rng = p.rng || Math.random;
+    const minMeld = p.minMeld == null ? 30 : p.minMeld;
+    const table = p.table.map((s) => s.slice());
+    const hand = p.hand.slice();
+    const deadline = now() + (level >= 3 ? 450 : 200);
+    const candidates = [];
+
+    if (level === 1 && rng() < 0.25) return null; // 쉬움: 가끔은 그냥 뽑는다
+
+    const melds = bestMelds(hand, p.melded ? 0 : minMeld, level === 1 ? 1500 : 8000, deadline);
+    let base = null;
+    if (melds) {
+      const ids = new Set(melds.reduce((a, s) => a.concat(s), []));
+      base = { table: table.concat(melds), hand: hand.filter((id) => !ids.has(id)) };
+    }
+    if (!p.melded) {
+      if (base) candidates.push(base);
+    } else {
+      if (level === 1) {
+        // 쉬움: 새 세트는 내고, 이어 붙이기는 절반쯤만, 재배치는 하지 않음
+        const start = base || { table, hand };
+        const ext = rng() < 0.5 ? extendSets(start.table, start.hand) : start;
+        if (ext.hand.length < hand.length) candidates.push(ext);
+      } else {
+        const start = base || { table, hand };
+        const ext = extendSets(start.table, start.hand);
+        if (ext.hand.length < hand.length) candidates.push(ext);
+        // 보통: 절반쯤의 차례에만 짧게(약 0.06초), 어려움: 매번 길게(약 0.7초) 테이블을 다시 짜 본다
+        if (level >= 3 || rng() < 0.45) {
+          const r = rearrange(table, hand, level >= 3 ? deadline + 250 : now() + 60);
+          if (r && r.hand.length < hand.length) candidates.push(r);
+        }
+      }
+    }
+    candidates.sort((a, b) => a.hand.length - b.hand.length);
+    for (const c of candidates) {
+      const v = validateTurn({ tableBefore: table, handBefore: hand, tableAfter: c.table, handAfter: c.hand, melded: p.melded, minMeld });
+      if (v.ok) return c;
+    }
+    return null;
+  }
+
+  const LEVEL_NAMES = { 1: '쉬움', 2: '보통', 3: '어려움' };
+  return { chooseMove, bestMelds, extendSets, rearrange, genCandidates, LEVEL_NAMES };
+});
+</script>
+<script>/*!
  * 루미큐브 온라인 통신 모듈 (rk-net.js)
  * - Firebase를 직접 부르지 않고 어댑터(fb)를 통해서만 접근한다 → 가짜 DB로 테스트 가능.
  * - fb 어댑터 규약 (경로는 'a/b/c' 문자열, 루트는 ''):
@@ -748,11 +996,15 @@ window.FIREBASE_CONFIG = {
       handSize: pick(x.handSize, [10, 14], 14),
       turnSec: pick(x.turnSec, [0, 60, 90, 120], 90),
       totalMin: pick(x.totalMin, [0, 20, 30, 40], 30),
+      aiLevel: pick(x.aiLevel, [1, 2, 3], 2),
     };
   }
+  /** 컴퓨터가 '생각하는' 시간(1.5~3초) */
+  const thinkMs = (seq) => 1500 + ((seq * 7919) % 1500);
 
   function createNet(fb, RK, opts) {
     const o = opts || {};
+    const AI = o.AI || (typeof self !== 'undefined' ? self.RKAI : null);
     const cid = o.cid;
     const clock = o.now || (() => Date.now());
     let code = null;
@@ -777,7 +1029,7 @@ window.FIREBASE_CONFIG = {
       const seats = [];
       for (let i = 0; i < st.players; i++) {
         const s = room.seats && room.seats[i];
-        seats.push(s ? { name: s.name, online: !!s.online } : null);
+        seats.push(s ? { name: s.name, online: !!s.online, bot: !!s.bot, ai: !!s.ai } : null);
       }
       const v = {
         code,
@@ -827,7 +1079,7 @@ window.FIREBASE_CONFIG = {
     function markOnline() {
       if (seat == null || !code || marking) return;
       marking = true;
-      Promise.resolve(fb.update(base() + '/seats/' + seat, { online: true }))
+      Promise.resolve(fb.update(base() + '/seats/' + seat, { online: true, ai: null }))
         .then(() => fb.onDisconnectSet(base() + '/seats/' + seat + '/online', false))
         .catch(() => {})
         .then(() => {
@@ -965,6 +1217,26 @@ window.FIREBASE_CONFIG = {
       await fb.set(base() + '/seats/' + i, null);
     }
 
+    async function addBot(i) {
+      const v = buildView();
+      if (!v.isHost || v.status !== 'lobby' || i < 0 || i >= v.settings.players) return;
+      await fb.transaction(base() + '/seats/' + i, (cur) => (cur ? undefined : { name: '컴퓨터' + (i + 1), cid: 'bot-' + i, online: true, bot: true }));
+    }
+    async function fillBots() {
+      const v = buildView();
+      for (let i = 0; i < v.seats.length; i++) if (!v.seats[i]) await addBot(i);
+    }
+    /** 게임 중 접속이 끊긴 사람 자리를 컴퓨터가 대신 두게 함(다시 들어오면 돌려받음) */
+    async function takeoverOffline() {
+      const v = buildView();
+      if (!v.isHost || v.status !== 'playing') return 0;
+      const upd = {};
+      v.seats.forEach((s, i) => { if (s && !s.bot && !s.online && !s.ai) upd[base() + '/seats/' + i + '/ai'] = true; });
+      const n = Object.keys(upd).length;
+      if (n) await fb.update('', upd);
+      return n;
+    }
+
     async function startGame() {
       const v = buildView();
       if (!v.isHost || v.status !== 'lobby') throw new Error('방장만 시작할 수 있어요');
@@ -1022,7 +1294,7 @@ window.FIREBASE_CONFIG = {
         await fb.set(base(c) + '/seats/' + s, null);
         if (v.isHost) {
           const others = await fb.get(base(c) + '/seats');
-          const ids = others ? Object.keys(others) : [];
+          const ids = others ? Object.keys(others).filter((k) => !others[k].bot) : [];
           const upd = {};
           if (ids.length === 0) {
             upd[base(c)] = null;
@@ -1052,17 +1324,20 @@ window.FIREBASE_CONFIG = {
       return out;
     }
 
-    /** 차례 끝내기: 규칙 검사 → 테이블/차례 갱신 → 내 패 저장 */
-    async function commit(table, hand) {
+    /** 차례 끝내기: 규칙 검사 → 테이블/차례 갱신 → 패 저장 (target: 둘 자리, 컴퓨터 자리도 가능) */
+    async function commitFor(target, table, hand) {
+      const seat_ = target;
       const v = buildView();
       const g = v.game;
-      if (!g || v.status !== 'playing' || g.turn !== seat) return { ok: false, message: '지금은 내 차례가 아니에요' };
+      if (!g || v.status !== 'playing' || g.turn !== target) return { ok: false, message: '지금은 내 차례가 아니에요' };
+      let handBefore = v.myHand;
+      if (target !== seat) { const hs = await fb.get(handPath(target)); handBefore = hs ? P(hs) : []; }
       const chk = RK.validateTurn({
         tableBefore: g.table,
-        handBefore: v.myHand,
+        handBefore,
         tableAfter: table,
         handAfter: hand,
-        melded: g.melded[seat],
+        melded: g.melded[seat_],
         minMeld: v.settings.minMeld,
       });
       if (!chk.ok) return { ok: false, message: chk.message, badSets: chk.badSets, code: chk.code };
@@ -1070,19 +1345,19 @@ window.FIREBASE_CONFIG = {
       const players = v.settings.players;
       const compactTable = table.filter((s) => s.length > 0);
       const counts = g.counts.slice();
-      counts[seat] = hand.length;
+      counts[seat_] = hand.length;
       const melded = g.melded.slice();
-      melded[seat] = true;
+      melded[seat_] = true;
       let over = null;
       if (hand.length === 0) {
-        const hands = await readAllHands(players, seat, hand);
-        over = { scores: RK.roundScores(hands, seat), hands };
+        const hands = await readAllHands(players, seat_, hand);
+        over = { scores: RK.roundScores(hands, seat_), hands };
       }
       const t = now();
       const prevHand = myHandStr;
-      myHandStr = J(hand); // 화면 깜빡임 방지: 내 패를 먼저 반영
+      if (seat_ === seat) myHandStr = J(hand); // 화면 깜빡임 방지: 내 패를 먼저 반영
       const res = await fb.transaction(base() + '/game', (cur) => {
-        if (!cur || cur.seq !== g.seq || cur.turn !== seat) return undefined;
+        if (!cur || cur.seq !== g.seq || cur.turn !== seat_) return undefined;
         const n = Object.assign({}, cur, {
           seq: cur.seq + 1,
           tableJson: J(compactTable),
@@ -1092,12 +1367,12 @@ window.FIREBASE_CONFIG = {
           lastPlacedJson: J(chk.placed),
         });
         if (over) {
-          n.winner = seat;
+          n.winner = seat_;
           n.endReason = 'empty';
           n.scoresJson = J(over.scores);
           n.finalHandsJson = J(over.hands);
         } else {
-          n.turn = (seat + 1) % players;
+          n.turn = (seat_ + 1) % players;
           n.turnStartedAt = t;
         }
         return n;
@@ -1108,7 +1383,7 @@ window.FIREBASE_CONFIG = {
         return { ok: false, message: '그 사이에 차례가 바뀌었어요 (시간이 지났을 수 있어요)' };
       }
       const upd = {};
-      upd[handPath(seat)] = J(hand);
+      upd[handPath(seat_)] = J(hand);
       if (over) upd[base() + '/meta/status'] = 'over';
       await fb.update('', upd);
       return { ok: true };
@@ -1198,7 +1473,22 @@ window.FIREBASE_CONFIG = {
       return { ok: true };
     }
 
-    /** 1초마다 불러 주세요: 내 시간초과 처리, 끊긴 사람 대신 넘기기, 총 제한시간 종료 */
+    /** 컴퓨터 차례: 수를 계산해 두고, 낼 수 없으면 뽑고 넘김 */
+    async function runAI(target) {
+      const v = buildView();
+      const g = v.game;
+      if (!g || g.turn !== target || !AI) return passFor(target);
+      const hs = await fb.get(handPath(target));
+      const hand = hs ? P(hs) : [];
+      const mv = AI.chooseMove({ table: g.table, hand, melded: g.melded[target], minMeld: v.settings.minMeld, level: v.settings.aiLevel });
+      if (mv) {
+        const r = await commitFor(target, mv.table, mv.hand);
+        if (r.ok) return r;
+      }
+      return passFor(target);
+    }
+
+    /** 1초마다 불러 주세요: 내 시간초과 처리, 끊긴 사람 대신 넘기기, 컴퓨터 차례 두기, 총 제한시간 종료 */
     function tick() {
       if (busy || seat == null) return;
       const v = buildView();
@@ -1206,17 +1496,22 @@ window.FIREBASE_CONFIG = {
       const g = v.game;
       const st = v.settings;
       const t = now();
+      // 실행 담당: 접속 중인 사람(컴퓨터 제외) 중 번호가 가장 빠른 사람
       const online = [];
       v.seats.forEach((s, i) => {
-        if (s && s.online) online.push(i);
+        if (s && s.online && !s.bot) online.push(i);
       });
+      const cur = v.seats[g.turn];
+      const aiTurn = !!(cur && (cur.bot || cur.ai));
       const lowest = (ex) => {
         const c = online.filter((i) => i !== ex);
         return c.length ? Math.min.apply(null, c) : -1;
       };
       let job = null;
       if (g.endsAt && t >= g.endsAt && seat === lowest(-1)) job = () => finishByScore('timeup');
-      else if (st.turnSec > 0) {
+      else if (aiTurn) {
+        if (seat === lowest(-1) && t >= g.turnStartedAt + thinkMs(g.seq)) job = () => runAI(g.turn);
+      } else if (st.turnSec > 0) {
         const dl = g.turnStartedAt + st.turnSec * 1000;
         if (g.turn === seat && t >= dl) job = () => passFor(seat);
         else if (g.turn !== seat && t >= dl + GRACE_MS && seat === lowest(g.turn)) job = () => passFor(g.turn);
@@ -1234,7 +1529,8 @@ window.FIREBASE_CONFIG = {
     return {
       createRoom, joinRoom, resume, leave,
       updateSettings, kick, startGame, rematch,
-      commit,
+      commit: (table, hand) => commitFor(seat, table, hand),
+      addBot, fillBots, takeoverOffline,
       drawPass: () => passFor(seat),
       forcePass: () => {
         const v = buildView();
@@ -1256,7 +1552,7 @@ window.FIREBASE_CONFIG = {
     };
   }
 
-  return { createNet, sanitizeSettings };
+  return { createNet, sanitizeSettings, thinkMs };
 });
 </script>
 <script>
@@ -1315,7 +1611,7 @@ window.FIREBASE_CONFIG = {
     <li><b>첫 등록</b>: 내 타일만으로 세트를 만들고 합이 정해진 점수(기본 30점) 이상이어야 해요. 이때는 테이블 세트를 건드릴 수 없어요.</li>
     <li>등록 후에는 테이블의 세트를 <b>쪼개고 합치고 옮겨서</b> 다시 배치할 수 있어요. 단, 차례를 끝낼 때 <b>모든 세트가 올바라야</b> 해요.</li>
     <li>낼 수 없으면 타일 1장을 뽑고 차례를 넘겨요.</li>
-    <li>끝나면 남은 타일의 숫자 합(조커 30)이 감점이에요.</li>
+    <li>끝나면 남은 타일의 숫자 합(조커 30)이 감점이에요.</li><li><b>컴퓨터(🤖)</b>: 사람이 모자라면 방장이 대기실에서 컴퓨터를 넣을 수 있어요. 컴퓨터는 자기 패와 테이블만 보고 둬요. 난이도는 쉬움·보통·어려움.</li>
     <li><b>조작</b>: 패의 타일을 <b>두 번 누르면</b> ▶ 표시된 세트(없으면 새 세트)로 들어가고 순서도 알아서 맞춰져요. 새 세트를 만들려면 타일을 빈 곳에 <b>끌어다 놓으세요</b>. 세트를 한 번 누르면 그 세트가 ▶ 대상이 되고, 왼쪽 ⠿ 손잡이로 세트 순서를 바꿀 수 있어요. 이번 차례에 낸 타일을 두 번 누르면 패로 돌아와요.</li><li>받침대는 2줄 칸이에요. 원하는 칸에 끌어다 꽂아 정리하세요. 초록 테두리 = 올바른 세트, 빨강 = 틀린 세트.</li></ul>
     <button id="m-close" class="primary">닫기</button>`;
   $('#modal').addEventListener('click', (e) => { if (e.target.id === 'm-close') closeModal(); });
@@ -1328,9 +1624,11 @@ window.FIREBASE_CONFIG = {
     { k: 'totalMin', label: '전체 제한 시간', opts: [[0, '없음'], [20, '20분'], [30, '30분 (기본)'], [40, '40분']], def: 30 },
     { k: 'handSize', label: '시작 패 개수', opts: [[10, '10개 (짧게)'], [14, '14개 (기본)']], def: 14 },
     { k: 'jokers', label: '조커', opts: [[2, '2개 (기본)'], [0, '없음']], def: 2 },
+    { k: 'bots', label: '그중 컴퓨터', opts: [[0, '없음'], [1, '1명'], [2, '2명'], [3, '3명']], def: 0, localOnly: true },
+    { k: 'aiLevel', label: '컴퓨터 난이도', opts: [[1, '쉬움'], [2, '보통 (기본)'], [3, '어려움']], def: 2 },
   ];
   function settingsHTML(pre, solo, vals) {
-    return '<div class="grid2">' + FIELDS.map((f) => {
+    return '<div class="grid2">' + FIELDS.filter((f) => solo || !f.localOnly).map((f) => {
       const cur = vals && vals[f.k] != null ? vals[f.k] : (solo && f.k === 'players' ? 1 : f.def);
       const opts = (solo && f.solo ? f.solo : f.opts).map((o) => `<option value="${o[0]}" ${o[0] === cur ? 'selected' : ''}>${o[1]}</option>`).join('');
       return `<label class="f">${f.label}<select id="${pre}-${f.k}">${opts}</select></label>`;
@@ -1338,7 +1636,7 @@ window.FIREBASE_CONFIG = {
   }
   function readSettings(pre) {
     const o = {};
-    FIELDS.forEach((f) => { o[f.k] = Number($('#' + pre + '-' + f.k).value); });
+    FIELDS.forEach((f) => { const el = $('#' + pre + '-' + f.k); if (el) o[f.k] = Number(el.value); });
     return o;
   }
   function summaryHTML(s) {
@@ -1347,31 +1645,36 @@ window.FIREBASE_CONFIG = {
       ['인원', s.players + '명'], ['첫 등록', s.minMeld ? s.minMeld + '점' : '없음'],
       ['차례 시간', s.turnSec ? s.turnSec + '초' : '제한 없음'], ['전체 시간', t(s.totalMin, '분')],
       ['시작 패', s.handSize + '개'], ['조커', s.jokers ? s.jokers + '개' : '없음'],
+      ['컴퓨터 난이도', ({ 1: '쉬움', 2: '보통', 3: '어려움' })[s.aiLevel] || '보통'],
     ].map((r) => `<span>${r[0]}</span><span>${r[1]}</span>`).join('');
   }
   $('#create-settings').innerHTML = settingsHTML('cs', false, { minMeld: 30 });
-  $('#local-settings').innerHTML = settingsHTML('ls', true);
+  $('#local-settings').innerHTML = settingsHTML('ls', true, { players: 4, bots: 3 });
+  /** 이름 표시: 컴퓨터는 🤖, 대신 두는 중이면 표시 */
+  const dispName = (s) => (!s ? '?' : s.bot ? '🤖 ' + s.name : s.ai ? s.name + ' (🤖 대신)' : s.name);
 
   /* ================= 로컬(한 화면) 컨트롤러 ================= */
   function makeLocal(settings) {
     const st = NET.sanitizeSettings(settings, true);
-    let state, cover, seq, t0, endsAt, lastPlaced;
+    const bots = Math.max(0, Math.min(Number(settings.bots) || 0, st.players - 1));
+    const humans = st.players - bots;
+    const isBot = (i) => i >= humans;
+    let state, cover, seq, t0, endsAt, lastPlaced, viewer;
     const subs = new Set();
     const names = [];
-    for (let i = 0; i < st.players; i++) names.push(st.players > 1 ? '플레이어 ' + (i + 1) : '나');
+    for (let i = 0; i < st.players; i++) names.push(isBot(i) ? '컴퓨터' + (i - humans + 1) : humans > 1 ? '플레이어 ' + (i + 1) : '나');
     function init() {
       state = RK.newGame({ players: st.players, minMeld: st.minMeld, jokers: st.jokers, handSize: st.handSize });
-      cover = st.players > 1; seq = 1; t0 = Date.now(); lastPlaced = [];
+      viewer = 0; cover = humans > 1; seq = 1; t0 = Date.now(); lastPlaced = [];
       endsAt = st.totalMin ? Date.now() + st.totalMin * 60000 : 0;
     }
     init();
     function getView() {
       const over = state.over;
-      const seat = over ? 0 : state.turn;
       return {
-        code: null, roomName: '', hasPw: false, settings: st, local: true,
-        status: over ? 'over' : 'playing', seats: names.map((n) => ({ name: n, online: true })),
-        mySeat: seat, isHost: true, cover: cover && !over, myHand: state.hands[seat].slice(), pool: null,
+        code: null, roomName: '', hasPw: false, settings: Object.assign({}, st, { bots }), local: true,
+        status: over ? 'over' : 'playing', seats: names.map((n, i) => ({ name: n, online: true, bot: isBot(i) })),
+        mySeat: viewer, isHost: true, cover: cover && !over, myHand: state.hands[viewer].slice(), pool: null,
         game: {
           seq, turn: state.turn, turnStartedAt: t0, endsAt, table: state.table, melded: state.melded,
           counts: state.hands.map((h) => h.length), poolLeft: state.pool.length, passes: state.passes, lastPlaced,
@@ -1381,22 +1684,41 @@ window.FIREBASE_CONFIG = {
       };
     }
     function emit() { const v = getView(); subs.forEach((f) => f(v)); }
-    function after() { seq++; t0 = Date.now(); cover = st.players > 1 && !state.over; emit(); }
+    function after() {
+      seq++; t0 = Date.now();
+      if (!state.over && !isBot(state.turn)) {
+        cover = humans > 1 && state.turn !== viewer;
+        viewer = state.turn;
+      } else cover = false;
+      emit();
+    }
+    function botMove() {
+      const mv = window.RKAI && window.RKAI.chooseMove({ table: state.table, hand: state.hands[state.turn], melded: state.melded[state.turn], minMeld: state.minMeld, level: st.aiLevel });
+      const r = mv ? RK.commitTurn(state, mv.table, mv.hand) : null;
+      if (r && r.ok) { state = r.state; lastPlaced = r.result.placed; }
+      else { state = RK.drawAndPass(state).state; lastPlaced = []; }
+      after();
+    }
     return {
       getView, now: () => Date.now(),
       subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
       async commit(table, hand) {
+        if (state.turn !== viewer) return { ok: false, message: '지금은 내 차례가 아니에요' };
         const r = RK.commitTurn(state, table, hand);
         if (!r.ok) return { ok: false, message: r.message, badSets: r.badSets, code: r.code };
         state = r.state; lastPlaced = r.result.placed; after(); return { ok: true };
       },
-      async drawPass() { const r = RK.drawAndPass(state); state = r.state; lastPlaced = []; after(); return { ok: true }; },
+      async drawPass() {
+        if (state.turn !== viewer) return { ok: false };
+        state = RK.drawAndPass(state).state; lastPlaced = []; after(); return { ok: true };
+      },
       reveal() { cover = false; t0 = Date.now(); emit(); },
       tick() {
         if (state.over || cover) return;
         const t = Date.now();
         if (endsAt && t >= endsAt) { state = RK.finishByScore(state, 'timeup'); after(); return; }
-        if (st.turnSec && t >= t0 + st.turnSec * 1000) { const r = RK.drawAndPass(state); state = r.state; lastPlaced = []; after(); }
+        if (isBot(state.turn)) { if (t >= t0 + NET.thinkMs(seq) * (window.__AI_FAST__ ? 0.1 : 1)) botMove(); return; }
+        if (st.turnSec && t >= t0 + st.turnSec * 1000) { state = RK.drawAndPass(state).state; lastPlaced = []; after(); }
       },
       async endGame() { if (!state.over) { state = RK.finishByScore(state, 'host'); after(); } },
       async rematch() { init(); emit(); },
@@ -1519,9 +1841,11 @@ window.FIREBASE_CONFIG = {
     const v = view;
     $('#lb-code').textContent = v.code;
     $('#lb-name').textContent = [v.roomName, v.hasPw ? '비밀번호 방' : ''].filter(Boolean).join(' · ');
+    const empty = v.seats.filter((s) => !s).length;
     $('#lb-seats').innerHTML = v.seats.map((s, i) => s
-      ? `<div class="seat ${s.online ? '' : 'off'}"><span class="dot"></span><span class="nm">${esc(s.name)}${i === v.mySeat ? ' (나)' : ''}${i === 0 ? ' 👑' : ''}</span>${v.isHost && i !== v.mySeat ? `<button data-kick="${i}" class="ghost" style="padding:4px 10px">내보내기</button>` : ''}</div>`
-      : `<div class="seat empty"><span class="dot"></span><span class="nm">기다리는 중…</span></div>`).join('');
+      ? `<div class="seat ${s.online ? '' : 'off'} ${s.bot ? 'bot' : ''}"><span class="dot"></span><span class="nm">${esc(dispName(s))}${i === v.mySeat ? ' (나)' : ''}${i === 0 && !s.bot ? ' 👑' : ''}</span>${v.isHost && i !== v.mySeat ? `<button data-kick="${i}" class="ghost" style="padding:4px 10px">${s.bot ? '빼기' : '내보내기'}</button>` : ''}</div>`
+      : `<div class="seat empty"><span class="dot"></span><span class="nm">기다리는 중…</span>${v.isHost ? `<button data-bot="${i}" style="padding:4px 10px">🤖 컴퓨터 넣기</button>` : ''}</div>`).join('')
+      + (v.isHost && empty > 1 ? '<button data-fill="1" class="ghost" style="margin-top:4px">🤖 빈자리 모두 컴퓨터로</button>' : '');
     $('#lb-summary').innerHTML = summaryHTML(v.settings);
     $('#lb-hostbox').classList.toggle('hidden', !v.isHost);
     const k = J(v.settings);
@@ -1529,11 +1853,14 @@ window.FIREBASE_CONFIG = {
     const full = v.seats.every(Boolean);
     $('#lb-start').classList.toggle('hidden', !v.isHost);
     $('#lb-start').disabled = !full;
-    $('#lb-wait').textContent = v.isHost ? (full ? '모두 모였어요! 시작하세요.' : '친구들이 방 코드를 입력하면 자리가 채워져요.') : '방장이 시작하기를 기다리는 중이에요…';
+    $('#lb-wait').textContent = v.isHost ? (full ? '모두 모였어요! 시작하세요.' : '친구들이 방 코드를 입력하면 자리가 채워져요. 사람이 모자라면 컴퓨터를 넣을 수 있어요.') : '방장이 시작하기를 기다리는 중이에요…';
   }
   $('#lb-seats').addEventListener('click', (e) => {
     const b = e.target.closest('[data-kick]');
     if (b) ctl.kick(Number(b.dataset.kick)).catch((er) => toast(er.message));
+    const bb = e.target.closest('[data-bot]');
+    if (bb) ctl.addBot(Number(bb.dataset.bot)).catch((er) => toast(er.message));
+    if (e.target.closest('[data-fill]')) ctl.fillBots().catch((er) => toast(er.message));
   });
   $('#lb-save').onclick = async () => {
     try { await ctl.updateSettings(readSettings('lb')); toast('설정을 바꿨어요'); } catch (e) { toast(e.message); }
@@ -1573,10 +1900,10 @@ window.FIREBASE_CONFIG = {
     $('#g-code').textContent = v.local ? '연습' : '방 ' + v.code;
     $('#g-pool').textContent = '더미 ' + g.poolLeft;
     const cur = v.seats[g.turn];
-    $('#g-turn').textContent = mine ? '내 차례예요!' : (cur ? cur.name : '') + ' 님의 차례';
+    $('#g-turn').textContent = mine ? '내 차례예요!' : cur && (cur.bot || cur.ai) ? '🤖 ' + cur.name + ' 생각 중…' : (cur ? cur.name : '') + ' 님의 차례';
     $('#g-turn').className = 'turn' + (mine ? ' mine' : '');
     $('#opps').innerHTML = v.seats.map((s, i) =>
-      `<div class="opp ${i === g.turn ? 'cur' : ''} ${s && !s.online ? 'off' : ''}"><b>${esc(s ? s.name : '?')}${i === v.mySeat && !v.local ? ' (나)' : ''}</b><span>타일 ${g.counts[i]}개</span><i>${g.melded[i] ? '등록 ✔' : '등록 전'}${s && !s.online ? ' · 끊김' : ''}</i></div>`).join('');
+      `<div class="opp ${i === g.turn ? 'cur' : ''} ${s && !s.online ? 'off' : ''}"><b>${esc(dispName(s))}${i === v.mySeat && s && s.name !== '나' && !(v.local && v.seats.filter((x) => !x.bot).length > 1) ? ' (나)' : ''}</b><span>타일 ${g.counts[i]}개</span><i>${g.melded[i] ? '등록 ✔' : '등록 전'}${s && !s.online && !s.ai ? ' · 끊김' : ''}</i></div>`).join('');
     $('#opps').classList.toggle('hidden', v.seats.length < 2);
     renderBoard(); renderRack(); renderControls(); updateTimers();
   }
@@ -1631,7 +1958,8 @@ window.FIREBASE_CONFIG = {
     $('#b-draw').disabled = !(mine && !dirty && !acting);
     $('#b-draw').textContent = g.poolLeft > 0 ? '타일 뽑고 넘기기' : '넘기기 (더미 없음)';
     const off = view.seats[g.turn] && !view.seats[g.turn].online;
-    $('#b-force').classList.toggle('hidden', !(view.isHost && !view.local && !mine && off));
+    $('#b-force').classList.toggle('hidden', !(view.isHost && !view.local && !mine && off && !view.seats[g.turn].ai));
+    $('#b-ai').classList.toggle('hidden', !(view.isHost && !view.local && view.seats.some((s) => s && !s.bot && !s.online && !s.ai)));
     if (!$('#msg').classList.contains('err') && !$('#msg').classList.contains('good')) {
       let t = '';
       if (mine) {
@@ -1647,7 +1975,8 @@ window.FIREBASE_CONFIG = {
     if (!view || view.status !== 'playing' || !view.game || !ctl) return;
     const g = view.game, st = view.settings, t = ctl.now();
     const tt = $('#g-tt');
-    if (st.turnSec > 0 && !view.cover) {
+    const cs = view.seats[g.turn];
+    if (st.turnSec > 0 && !view.cover && !(cs && (cs.bot || cs.ai))) {
       const left = Math.max(0, Math.ceil((g.turnStartedAt + st.turnSec * 1000 - t) / 1000));
       tt.textContent = '⏱ ' + left + '초';
       tt.className = 'tm' + (left <= 10 ? ' warn' : '');
@@ -1686,6 +2015,7 @@ window.FIREBASE_CONFIG = {
   $('#b-draw').onclick = drawPass;
   $('#b-undo').onclick = undo;
   $('#b-force').onclick = () => ctl.forcePass();
+  $('#b-ai').onclick = async () => { const n = await ctl.takeoverOffline(); if (n) toast('끊긴 자리를 컴퓨터가 대신 둬요. 다시 들어오면 돌려받아요'); };
   function sortRack(mode) {
     if (!work) return;
     slots = layoutSorted(RK.sortHand(work.hand, mode));
@@ -1905,8 +2235,9 @@ window.FIREBASE_CONFIG = {
   function renderResult() {
     const v = view, g = v.game;
     const names = v.seats.map((s) => (s ? s.name : '?'));
+    const shown = v.seats.map(dispName);
     const reasons = {
-      empty: `${names[g.winner]} 님이 패를 모두 냈어요! 🎉`,
+      empty: `${shown[g.winner]} 님이 패를 모두 냈어요! 🎉`,
       stalemate: '더 이상 낼 수 있는 사람이 없어서, 감점이 가장 낮은 사람이 이겼어요',
       timeup: '제한 시간이 끝나서, 감점이 가장 낮은 사람이 이겼어요',
       host: '방장이 게임을 끝냈어요 (감점이 가장 낮은 사람이 승리)',
@@ -1916,7 +2247,7 @@ window.FIREBASE_CONFIG = {
     $('#rs-list').innerHTML = order.map((i, rank) => {
       const sc = g.scores[i];
       const hand = (g.finalHands && g.finalHands[i]) || [];
-      return `<div class="rank ${i === g.winner ? 'win' : ''}"><div class="hd"><span>${rank + 1}위</span><b>${esc(names[i])}${i === g.winner ? ' 👑' : ''}${i === v.mySeat && !v.local ? ' (나)' : ''}</b><span class="sc ${sc >= 0 ? 'pos' : 'neg'}">${sc > 0 ? '+' : ''}${sc}점</span></div>
+      return `<div class="rank ${i === g.winner ? 'win' : ''}"><div class="hd"><span>${rank + 1}위</span><b>${esc(shown[i])}${i === g.winner ? ' 👑' : ''}${i === v.mySeat && names[i] !== '나' && !(v.local && v.seats.filter((x) => !x.bot).length > 1) ? ' (나)' : ''}</b><span class="sc ${sc >= 0 ? 'pos' : 'neg'}">${sc > 0 ? '+' : ''}${sc}점</span></div>
         <div class="tiles">${hand.length ? hand.map((id) => tileHTML(id, 'mini')).join('') : '<span class="hint">남은 타일 없음</span>'}</div></div>`;
     }).join('');
     $('#rs-again').classList.toggle('hidden', !v.isHost);
@@ -1996,7 +2327,7 @@ window.FIREBASE_CONFIG = {
     st.textContent = '온라인 연결 준비 중…';
     try {
       const fb = await initFirebase();
-      netObj = NET.createNet(fb, RK, { cid });
+      netObj = NET.createNet(fb, RK, { cid, AI: window.RKAI });
       netReady = true;
       st.textContent = '온라인 연결 준비 완료 ✔';
       const sess = store.get('rk_sess');

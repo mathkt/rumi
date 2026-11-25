@@ -36,11 +36,15 @@
       handSize: pick(x.handSize, [10, 14], 14),
       turnSec: pick(x.turnSec, [0, 60, 90, 120], 90),
       totalMin: pick(x.totalMin, [0, 20, 30, 40], 30),
+      aiLevel: pick(x.aiLevel, [1, 2, 3], 2),
     };
   }
+  /** 컴퓨터가 '생각하는' 시간(1.5~3초) */
+  const thinkMs = (seq) => 1500 + ((seq * 7919) % 1500);
 
   function createNet(fb, RK, opts) {
     const o = opts || {};
+    const AI = o.AI || (typeof self !== 'undefined' ? self.RKAI : null);
     const cid = o.cid;
     const clock = o.now || (() => Date.now());
     let code = null;
@@ -65,7 +69,7 @@
       const seats = [];
       for (let i = 0; i < st.players; i++) {
         const s = room.seats && room.seats[i];
-        seats.push(s ? { name: s.name, online: !!s.online } : null);
+        seats.push(s ? { name: s.name, online: !!s.online, bot: !!s.bot, ai: !!s.ai } : null);
       }
       const v = {
         code,
@@ -115,7 +119,7 @@
     function markOnline() {
       if (seat == null || !code || marking) return;
       marking = true;
-      Promise.resolve(fb.update(base() + '/seats/' + seat, { online: true }))
+      Promise.resolve(fb.update(base() + '/seats/' + seat, { online: true, ai: null }))
         .then(() => fb.onDisconnectSet(base() + '/seats/' + seat + '/online', false))
         .catch(() => {})
         .then(() => {
@@ -253,6 +257,26 @@
       await fb.set(base() + '/seats/' + i, null);
     }
 
+    async function addBot(i) {
+      const v = buildView();
+      if (!v.isHost || v.status !== 'lobby' || i < 0 || i >= v.settings.players) return;
+      await fb.transaction(base() + '/seats/' + i, (cur) => (cur ? undefined : { name: '컴퓨터' + (i + 1), cid: 'bot-' + i, online: true, bot: true }));
+    }
+    async function fillBots() {
+      const v = buildView();
+      for (let i = 0; i < v.seats.length; i++) if (!v.seats[i]) await addBot(i);
+    }
+    /** 게임 중 접속이 끊긴 사람 자리를 컴퓨터가 대신 두게 함(다시 들어오면 돌려받음) */
+    async function takeoverOffline() {
+      const v = buildView();
+      if (!v.isHost || v.status !== 'playing') return 0;
+      const upd = {};
+      v.seats.forEach((s, i) => { if (s && !s.bot && !s.online && !s.ai) upd[base() + '/seats/' + i + '/ai'] = true; });
+      const n = Object.keys(upd).length;
+      if (n) await fb.update('', upd);
+      return n;
+    }
+
     async function startGame() {
       const v = buildView();
       if (!v.isHost || v.status !== 'lobby') throw new Error('방장만 시작할 수 있어요');
@@ -310,7 +334,7 @@
         await fb.set(base(c) + '/seats/' + s, null);
         if (v.isHost) {
           const others = await fb.get(base(c) + '/seats');
-          const ids = others ? Object.keys(others) : [];
+          const ids = others ? Object.keys(others).filter((k) => !others[k].bot) : [];
           const upd = {};
           if (ids.length === 0) {
             upd[base(c)] = null;
@@ -340,17 +364,20 @@
       return out;
     }
 
-    /** 차례 끝내기: 규칙 검사 → 테이블/차례 갱신 → 내 패 저장 */
-    async function commit(table, hand) {
+    /** 차례 끝내기: 규칙 검사 → 테이블/차례 갱신 → 패 저장 (target: 둘 자리, 컴퓨터 자리도 가능) */
+    async function commitFor(target, table, hand) {
+      const seat_ = target;
       const v = buildView();
       const g = v.game;
-      if (!g || v.status !== 'playing' || g.turn !== seat) return { ok: false, message: '지금은 내 차례가 아니에요' };
+      if (!g || v.status !== 'playing' || g.turn !== target) return { ok: false, message: '지금은 내 차례가 아니에요' };
+      let handBefore = v.myHand;
+      if (target !== seat) { const hs = await fb.get(handPath(target)); handBefore = hs ? P(hs) : []; }
       const chk = RK.validateTurn({
         tableBefore: g.table,
-        handBefore: v.myHand,
+        handBefore,
         tableAfter: table,
         handAfter: hand,
-        melded: g.melded[seat],
+        melded: g.melded[seat_],
         minMeld: v.settings.minMeld,
       });
       if (!chk.ok) return { ok: false, message: chk.message, badSets: chk.badSets, code: chk.code };
@@ -358,19 +385,19 @@
       const players = v.settings.players;
       const compactTable = table.filter((s) => s.length > 0);
       const counts = g.counts.slice();
-      counts[seat] = hand.length;
+      counts[seat_] = hand.length;
       const melded = g.melded.slice();
-      melded[seat] = true;
+      melded[seat_] = true;
       let over = null;
       if (hand.length === 0) {
-        const hands = await readAllHands(players, seat, hand);
-        over = { scores: RK.roundScores(hands, seat), hands };
+        const hands = await readAllHands(players, seat_, hand);
+        over = { scores: RK.roundScores(hands, seat_), hands };
       }
       const t = now();
       const prevHand = myHandStr;
-      myHandStr = J(hand); // 화면 깜빡임 방지: 내 패를 먼저 반영
+      if (seat_ === seat) myHandStr = J(hand); // 화면 깜빡임 방지: 내 패를 먼저 반영
       const res = await fb.transaction(base() + '/game', (cur) => {
-        if (!cur || cur.seq !== g.seq || cur.turn !== seat) return undefined;
+        if (!cur || cur.seq !== g.seq || cur.turn !== seat_) return undefined;
         const n = Object.assign({}, cur, {
           seq: cur.seq + 1,
           tableJson: J(compactTable),
@@ -380,12 +407,12 @@
           lastPlacedJson: J(chk.placed),
         });
         if (over) {
-          n.winner = seat;
+          n.winner = seat_;
           n.endReason = 'empty';
           n.scoresJson = J(over.scores);
           n.finalHandsJson = J(over.hands);
         } else {
-          n.turn = (seat + 1) % players;
+          n.turn = (seat_ + 1) % players;
           n.turnStartedAt = t;
         }
         return n;
@@ -396,7 +423,7 @@
         return { ok: false, message: '그 사이에 차례가 바뀌었어요 (시간이 지났을 수 있어요)' };
       }
       const upd = {};
-      upd[handPath(seat)] = J(hand);
+      upd[handPath(seat_)] = J(hand);
       if (over) upd[base() + '/meta/status'] = 'over';
       await fb.update('', upd);
       return { ok: true };
@@ -486,7 +513,22 @@
       return { ok: true };
     }
 
-    /** 1초마다 불러 주세요: 내 시간초과 처리, 끊긴 사람 대신 넘기기, 총 제한시간 종료 */
+    /** 컴퓨터 차례: 수를 계산해 두고, 낼 수 없으면 뽑고 넘김 */
+    async function runAI(target) {
+      const v = buildView();
+      const g = v.game;
+      if (!g || g.turn !== target || !AI) return passFor(target);
+      const hs = await fb.get(handPath(target));
+      const hand = hs ? P(hs) : [];
+      const mv = AI.chooseMove({ table: g.table, hand, melded: g.melded[target], minMeld: v.settings.minMeld, level: v.settings.aiLevel });
+      if (mv) {
+        const r = await commitFor(target, mv.table, mv.hand);
+        if (r.ok) return r;
+      }
+      return passFor(target);
+    }
+
+    /** 1초마다 불러 주세요: 내 시간초과 처리, 끊긴 사람 대신 넘기기, 컴퓨터 차례 두기, 총 제한시간 종료 */
     function tick() {
       if (busy || seat == null) return;
       const v = buildView();
@@ -494,17 +536,22 @@
       const g = v.game;
       const st = v.settings;
       const t = now();
+      // 실행 담당: 접속 중인 사람(컴퓨터 제외) 중 번호가 가장 빠른 사람
       const online = [];
       v.seats.forEach((s, i) => {
-        if (s && s.online) online.push(i);
+        if (s && s.online && !s.bot) online.push(i);
       });
+      const cur = v.seats[g.turn];
+      const aiTurn = !!(cur && (cur.bot || cur.ai));
       const lowest = (ex) => {
         const c = online.filter((i) => i !== ex);
         return c.length ? Math.min.apply(null, c) : -1;
       };
       let job = null;
       if (g.endsAt && t >= g.endsAt && seat === lowest(-1)) job = () => finishByScore('timeup');
-      else if (st.turnSec > 0) {
+      else if (aiTurn) {
+        if (seat === lowest(-1) && t >= g.turnStartedAt + thinkMs(g.seq)) job = () => runAI(g.turn);
+      } else if (st.turnSec > 0) {
         const dl = g.turnStartedAt + st.turnSec * 1000;
         if (g.turn === seat && t >= dl) job = () => passFor(seat);
         else if (g.turn !== seat && t >= dl + GRACE_MS && seat === lowest(g.turn)) job = () => passFor(g.turn);
@@ -522,7 +569,8 @@
     return {
       createRoom, joinRoom, resume, leave,
       updateSettings, kick, startGame, rematch,
-      commit,
+      commit: (table, hand) => commitFor(seat, table, hand),
+      addBot, fillBots, takeoverOffline,
       drawPass: () => passFor(seat),
       forcePass: () => {
         const v = buildView();
@@ -544,5 +592,5 @@
     };
   }
 
-  return { createNet, sanitizeSettings };
+  return { createNet, sanitizeSettings, thinkMs };
 });

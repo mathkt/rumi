@@ -176,6 +176,7 @@ require('fs').mkdirSync(OUT, { recursive: true });
     await page.waitForSelector('#s-home:not(.hidden)');
     await page.click('[data-tab="local"]');
     await page.selectOption('#ls-players', '2');
+    await page.selectOption('#ls-bots', '0');
     await page.click('#btn-local');
     assert.ok(await page.locator('#cover').isVisible());
     await page.click('#cv-go');
@@ -271,10 +272,54 @@ require('fs').mkdirSync(OUT, { recursive: true });
 
   await ok('제출 후 뽑은 타일은 빈칸에 들어가고 반짝임', async () => {
     await page.click('#b-undo');
-    await page.waitForTimeout(1800);
+    await page.waitForTimeout(2600);
     await page.click('#b-draw');
     await page.waitForTimeout(100);
     assert.strictEqual(await page.locator('#rack .tile.fresh').count(), 1);
+  });
+
+  await ok('연습: 나 + 컴퓨터 3명 (기본 설정) → 컴퓨터가 차례대로 두고 다시 내 차례', async () => {
+    await page.evaluate(() => { window.__AI_FAST__ = true; });
+    await page.evaluate(() => window.__app.ctl.leave());
+    await page.reload();
+    await page.evaluate(() => { window.__AI_FAST__ = true; });
+    await page.click('[data-tab="local"]');
+    assert.strictEqual(await page.inputValue('#ls-players'), '4');
+    assert.strictEqual(await page.inputValue('#ls-bots'), '3');
+    await page.selectOption('#ls-aiLevel', '3');
+    await page.click('#btn-local');
+    await page.waitForSelector('#s-game:not(.hidden)');
+    assert.ok(await page.locator('#cover').isHidden()); // 사람이 1명이면 가림막 없음
+    assert.strictEqual(await page.locator('.opp').count(), 4);
+    assert.ok((await page.locator('#opps').textContent()).includes('🤖 컴퓨터1'));
+    await page.click('#b-draw');
+    await page.waitForFunction(() => document.querySelector('#g-turn').textContent.includes('생각 중'), null, { timeout: 3000 });
+    await page.screenshot({ path: OUT + '/12-ai-thinking.png' });
+    await page.waitForFunction(() => document.querySelector('#g-turn').textContent.includes('내 차례'), null, { timeout: 8000 });
+    const v = await getView();
+    assert.strictEqual(v.mySeat, 0);
+    assert.strictEqual(v.game.turn, 0);
+    assert.strictEqual(v.game.seq, 5);
+  });
+
+  await ok('연습: 사람 2 + 컴퓨터 2 → 사람 차례가 바뀔 때만 가림막', async () => {
+    await page.evaluate(() => window.__app.ctl.leave());
+    await page.reload();
+    await page.evaluate(() => { window.__AI_FAST__ = true; });
+    await page.click('[data-tab="local"]');
+    await page.selectOption('#ls-players', '4');
+    await page.selectOption('#ls-bots', '2');
+    await page.click('#btn-local');
+    await page.click('#cv-go');
+    await page.click('#b-draw'); // 플레이어1 → 플레이어2 : 가림막
+    await page.waitForTimeout(100);
+    assert.ok(await page.locator('#cover').isVisible());
+    assert.ok((await page.locator('#cover').textContent()).includes('플레이어 2'));
+    await page.click('#cv-go');
+    await page.click('#b-draw'); // 플레이어2 → 컴퓨터 둘 → 플레이어1 : 가림막
+    await page.waitForFunction(() => !document.querySelector('#cover').classList.contains('hidden') && document.querySelector('#cover').textContent.includes('플레이어 1'), null, { timeout: 8000 });
+    const v = await getView();
+    assert.strictEqual(v.game.turn, 0);
   });
   await ok('설정 반영: 조커 없음·패 10개·첫 등록 20점 연습', async () => {
     await page.evaluate(() => window.__app.ctl.leave());

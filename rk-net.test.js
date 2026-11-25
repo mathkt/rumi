@@ -2,7 +2,8 @@
 // 가짜 DB(실제 Firebase와 같은 규약)로 4명이 동시에 접속하는 상황을 검증한다.
 const assert = require('assert');
 const RK = require('./rk-engine.js');
-const { createNet } = require('./rk-net.js');
+const { createNet, thinkMs } = require('./rk-net.js');
+const AI = require('./rk-ai.js');
 
 const J = JSON.stringify;
 const T = RK.makeTile;
@@ -24,7 +25,7 @@ function world() {
   const db = makeFakeDB();
   const mk = (cid) => {
     const fb = db.client();
-    return { fb, net: createNet(fb, RK, { cid, now: clock }) };
+    return { fb, net: createNet(fb, RK, { cid, now: clock, AI }) };
   };
   return { db, mk };
 }
@@ -343,6 +344,112 @@ test('방장이 대기실에서 내보내기', async () => {
   await a.net.joinRoom({ code, name: '가' }); await flush();
   await h.net.kick(1); await flush();
   assert.strictEqual(h.net.getView().seats[1], null);
+});
+
+
+test('컴퓨터 넣기: 방장만, 빈자리에만, 모두 채우면 시작 가능, 빼기 가능', async () => {
+  const w = world();
+  const h = w.mk('h'), a = w.mk('a');
+  const { code } = await h.net.createRoom({ name: '선생님', settings: { players: 4, aiLevel: 1 } });
+  await a.net.joinRoom({ code, name: '가' });
+  await a.net.addBot(2); await flush();
+  assert.strictEqual(h.net.getView().seats[2], null); // 방장 아님 → 무시
+  await h.net.addBot(1); await flush();             // 이미 사람이 있는 자리 → 무시
+  assert.strictEqual(h.net.getView().seats[1].name, '가');
+  await h.net.fillBots(); await flush();
+  const v = a.net.getView();
+  assert.ok(v.seats[2].bot && v.seats[3].bot);
+  assert.strictEqual(v.seats[2].name, '컴퓨터3');
+  assert.strictEqual(v.settings.aiLevel, 1);
+  await h.net.kick(3); await flush();
+  assert.strictEqual(h.net.getView().seats[3], null);
+  await h.net.addBot(3); await flush();
+  await assert.rejects(w.mk('n').net.joinRoom({ code, name: '나' }), /가득/);
+  await h.net.startGame(); await flush();
+  assert.strictEqual(a.net.getView().status, 'playing');
+});
+
+test('사람 1 + 컴퓨터 3: 방장 화면이 컴퓨터 차례를 둬서 다시 내 차례로 돌아옴', async () => {
+  const w = world();
+  const h = w.mk('h');
+  const { code } = await h.net.createRoom({ name: '선생님', settings: { players: 4, turnSec: 60, totalMin: 0 } });
+  await h.net.fillBots(); await h.net.startGame(); await flush();
+  let guard = 0;
+  // 컴퓨터 차례면 생각 시간을 지나게 하고 tick
+  while (h.net.getView().game.turn !== 0 && guard++ < 10) {
+    h.net.tick(); await flush();
+    assert.notStrictEqual(h.net.getView().game.turn, -1);
+    clockNow += 3100;
+    h.net.tick(); await flush(); await flush();
+  }
+  assert.strictEqual(h.net.getView().game.turn, 0);
+  // 한 바퀴 더: 내가 뽑고 넘기면 컴퓨터 셋이 두고 돌아옴
+  await h.net.drawPass(); await flush();
+  const seq0 = h.net.getView().game.seq;
+  for (let i = 0; i < 3; i++) {
+    h.net.tick(); await flush();               // 생각 시간 전에는 두지 않음
+    assert.strictEqual(h.net.getView().game.seq, seq0 + i);
+    clockNow += 3100;
+    h.net.tick(); await flush(); await flush();
+    assert.strictEqual(h.net.getView().game.seq, seq0 + i + 1);
+  }
+  const g = h.net.getView().game;
+  assert.strictEqual(g.turn, 0);
+  // 컴퓨터의 패 수는 더미·테이블과 합이 맞아야 함
+  const hands = [1, 2, 3].map((i) => JSON.parse(w.db.getAt('rummikub/hands/' + code + '/' + i)));
+  hands.forEach((hd, k) => assert.strictEqual(hd.length, g.counts[k + 1]));
+  const all = [...JSON.parse(w.db.getAt('rummikub/hands/' + code + '/0')), ...hands.flat(), ...g.table.flat(), ...h.net.getView().pool.slice(g.poolPos)];
+  assert.strictEqual(new Set(all).size, 106);
+  assert.strictEqual(all.length, 106);
+});
+
+test('컴퓨터 차례는 방장(실행 담당) 한 명만 처리, 방장이 끊기면 다음 사람이 이어받음', async () => {
+  const w = world();
+  const h = w.mk('h'), a = w.mk('a');
+  const { code } = await h.net.createRoom({ name: '선생님', settings: { players: 3, turnSec: 0, totalMin: 0 } });
+  await a.net.joinRoom({ code, name: '가' });
+  await h.net.fillBots(); await h.net.startGame(); await flush();
+  // 컴퓨터(2번) 차례로 만든다
+  w.db.setRaw('rummikub/rooms/' + code + '/game/turn', 2); await flush();
+  clockNow += 3100;
+  a.net.tick(); await flush(); await flush();
+  assert.strictEqual(a.net.getView().game.turn, 2); // 학생 화면은 손대지 않음
+  h.fb._disconnect(); await flush();
+  assert.strictEqual(a.net.getView().seats[0].online, false);
+  a.net.tick(); await flush(); await flush();
+  assert.strictEqual(a.net.getView().game.turn, 0); // 학생 화면이 이어받아 둠
+});
+
+test('끊긴 사람 자리를 컴퓨터로 대신 → 컴퓨터가 두고, 같은 이름으로 들어오면 돌려받음', async () => {
+  const { w, cs, code } = await fullRoom({ players: 3, turnSec: 0, totalMin: 0 });
+  await cs[0].net.startGame(); await flush();
+  cs[1].fb._disconnect(); await flush();
+  assert.strictEqual(await cs[2].net.takeoverOffline(), 0); // 방장만
+  assert.strictEqual(await cs[0].net.takeoverOffline(), 1); await flush();
+  assert.ok(cs[2].net.getView().seats[1].ai);
+  w.db.setRaw('rummikub/rooms/' + code + '/game/turn', 1); await flush();
+  const seq = cs[0].net.getView().game.seq;
+  clockNow += 3100;
+  cs[0].net.tick(); await flush(); await flush();
+  assert.strictEqual(cs[0].net.getView().game.turn, 2);
+  assert.ok(cs[0].net.getView().game.seq > seq);
+  const back = w.mk('a-new');
+  await back.net.joinRoom({ code, name: '가' }); await flush();
+  const s1 = cs[0].net.getView().seats[1];
+  assert.ok(s1.online && !s1.ai);
+});
+
+test('컴퓨터만 남기고 방장이 대기실에서 나가면 방 삭제', async () => {
+  const w = world();
+  const h = w.mk('h');
+  const { code } = await h.net.createRoom({ name: '선생님', settings: { players: 2 } });
+  await h.net.fillBots(); await flush();
+  await h.net.leave(); await flush();
+  assert.strictEqual(w.db.getAt('rummikub/rooms/' + code), null);
+});
+
+test('생각 시간은 1.5~3초', () => {
+  for (let i = 0; i < 50; i++) { const t = thinkMs(i); assert.ok(t >= 1500 && t < 3000); }
 });
 
 (async () => {

@@ -357,6 +357,37 @@ test('moveTile: 자기 자신 앞에 놓거나 없는 타일은 null', () => {
   assert.strictEqual(RK.moveTile(w, T(B, 9), { type: 'new' }), null);
 });
 
+/* ----- 자동 정렬·세트 이동 ----- */
+test('arrangeSet: 런은 숫자 순', () => {
+  assert.deepStrictEqual(RK.arrangeSet([T(B, 7), T(B, 5), T(B, 6)]), [T(B, 5), T(B, 6), T(B, 7)]);
+});
+test('arrangeSet: 런의 빈 숫자는 조커가 채움', () => {
+  assert.deepStrictEqual(RK.arrangeSet([T(R, 8), J1, T(R, 6)]), [T(R, 6), J1, T(R, 8)]);
+  assert.ok(RK.validateSet(RK.arrangeSet([T(R, 8), J1, T(R, 6)])).valid);
+});
+test('arrangeSet: 남는 조커는 뒤, 13을 넘으면 앞', () => {
+  assert.deepStrictEqual(RK.arrangeSet([J1, T(R, 4), T(R, 5)]), [T(R, 4), T(R, 5), J1]);
+  assert.deepStrictEqual(RK.arrangeSet([T(R, 13), J1, T(R, 12)]), [J1, T(R, 12), T(R, 13)]);
+});
+test('arrangeSet: 그룹은 색 순, 조커 뒤', () => {
+  assert.deepStrictEqual(RK.arrangeSet([T(K, 9), J1, T(R, 9), T(Y, 9)]), [T(R, 9), T(Y, 9), T(K, 9), J1]);
+});
+test('arrangeSet: 1장·2장 런/그룹 진행 중에도 정렬', () => {
+  assert.deepStrictEqual(RK.arrangeSet([T(B, 9), T(B, 8)]), [T(B, 8), T(B, 9)]);
+  assert.deepStrictEqual(RK.arrangeSet([T(K, 3)]), [T(K, 3)]);
+});
+test('arrangeSet: 타일을 잃거나 늘리지 않음', () => {
+  const s = [T(R, 2), T(B, 9), J1, T(R, 2, 1)];
+  assert.deepStrictEqual(RK.arrangeSet(s).slice().sort(), s.slice().sort());
+});
+test('moveSet: 앞으로·뒤로·맨 뒤로', () => {
+  const t = [[1], [2], [3], [4]];
+  assert.deepStrictEqual(RK.moveSet(t, 3, 0), [[4], [1], [2], [3]]);
+  assert.deepStrictEqual(RK.moveSet(t, 0, 2), [[2], [1], [3], [4]]);
+  assert.deepStrictEqual(RK.moveSet(t, 1, 4), [[1], [3], [4], [2]]);
+  assert.deepStrictEqual(t, [[1], [2], [3], [4]]);
+});
+
 /* ----- 결과 ----- */
 console.log(`통과 ${passed}개 / 실패 ${failed.length}개`);
 failed.forEach(([n, m]) => console.log('  ✗', n, '→', m));

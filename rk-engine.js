@@ -282,6 +282,56 @@
     return { table: table.filter((s) => s.length > 0), hand };
   }
 
+  /**
+   * 세트 안 타일을 보기 좋게 자동 정렬 (더블클릭으로 넣을 때 사용).
+   * - 같은 색·서로 다른 숫자 → 런: 숫자 순, 빈 숫자는 조커로 채움, 남는 조커는 뒤(13을 넘으면 앞)
+   * - 같은 숫자 → 그룹: 색 순, 조커는 뒤
+   * - 진짜 타일이 1장 이하이거나 어느 쪽도 아니면: 그룹/런 어느 쪽도 아닌 경우 색·숫자 순
+   */
+  function arrangeSet(ids) {
+    const real = ids.filter((id) => !isJoker(id));
+    const jokers = ids.filter(isJoker);
+    if (real.length <= 1) return ids.slice();
+    const colors = new Set(real.map(colorOf));
+    const nums = new Set(real.map(numOf));
+    const byNum = real.slice().sort((a, b) => numOf(a) - numOf(b) || a - b);
+    if (colors.size === 1 && nums.size === real.length) {
+      const lo = numOf(byNum[0]);
+      const hi = numOf(byNum[byNum.length - 1]);
+      const gaps = hi - lo + 1 - real.length;
+      if (gaps <= jokers.length) {
+        const out = [];
+        const js = jokers.slice();
+        let k = 0;
+        for (let n = lo; n <= hi; n++) {
+          if (k < byNum.length && numOf(byNum[k]) === n) out.push(byNum[k++]);
+          else out.push(js.shift());
+        }
+        let top = hi;
+        while (js.length) {
+          if (top < 13) { out.push(js.shift()); top++; }
+          else out.unshift(js.shift());
+        }
+        return out;
+      }
+      return byNum.concat(jokers);
+    }
+    if (nums.size === 1) {
+      return real.slice().sort((a, b) => colorOf(a) - colorOf(b) || a - b).concat(jokers);
+    }
+    return real.slice().sort((a, b) => colorOf(a) - colorOf(b) || numOf(a) - numOf(b) || a - b).concat(jokers);
+  }
+
+  /** 세트 순서 바꾸기: from 번째 세트를 before 번째 세트 앞으로(before = 길이 → 맨 뒤) */
+  function moveSet(table, from, before) {
+    const t = table.map((s) => s.slice());
+    if (from < 0 || from >= t.length) return t;
+    const [s] = t.splice(from, 1);
+    const b = before > from ? before - 1 : before;
+    t.splice(Math.max(0, Math.min(b, t.length)), 0, s);
+    return t;
+  }
+
   /* ---------- 점수 ---------- */
   const handPenalty = (hand) => hand.reduce((s, id) => s + (isJoker(id) ? JOKER_PENALTY : numOf(id)), 0);
 
@@ -393,7 +443,7 @@
     isJoker, colorOf, numOf, tileInfo, makeTile,
     createDeck, shuffle, mulberry32,
     validateSet, validateTable, validateTurn,
-    meldPointsOf, moveTile,
+    meldPointsOf, moveTile, arrangeSet, moveSet,
     handPenalty, roundScores, sortHand,
     newGame, drawAndPass, commitTurn, finishByScore,
   };

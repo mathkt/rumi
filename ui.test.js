@@ -78,15 +78,15 @@ require('fs').mkdirSync(OUT, { recursive: true });
   });
 
   await ok('같은 세트 안에서 순서 바꾸기(타일을 다른 타일 앞에 끼워 넣기)', async () => {
-    const first = await center('.set .tile:first-child');
-    const last = await center('.set .tile:nth-child(3)');
-    await drag('.set .tile:nth-child(3)', { x: first.b.x + 2, y: first.y });
+    const first = await center('.set .tile:first-of-type');
+    const last = await center('.set .tile:nth-of-type(3)');
+    await drag('.set .tile:nth-of-type(3)', { x: first.b.x + 2, y: first.y });
     const w = await getWork();
     assert.deepStrictEqual(w.table[0].slice().sort(), [R10, B10, Y10].sort());
     assert.strictEqual(w.table[0][0], Y10);
     assert.ok(last);
     // 원래대로
-    await drag('.set .tile:nth-child(1)', { x: (await center('.set')).b.x + (await center('.set')).b.width - 4, y: (await center('.set')).y });
+    await drag('.set .tile:nth-of-type(1)', { x: (await center('.set')).b.x + (await center('.set')).b.width - 4, y: (await center('.set')).y });
     const w2 = await getWork();
     assert.strictEqual(w2.table[0].length, 3);
   });
@@ -119,7 +119,7 @@ require('fs').mkdirSync(OUT, { recursive: true });
 
   await ok('테이블에 원래 있던 타일은 패로 가져올 수 없음', async () => {
     const rack = await center('#rack');
-    await drag('.set .tile:nth-child(2)', { x: rack.x, y: rack.y });
+    await drag('.set .tile:nth-of-type(2)', { x: rack.x, y: rack.y });
     const w = await getWork();
     assert.strictEqual(w.table[0].length, 3);
     assert.ok((await page.locator('#msg').textContent()).includes('원래 있던'));
@@ -187,6 +187,95 @@ require('fs').mkdirSync(OUT, { recursive: true });
     await page.screenshot({ path: OUT + '/4-cover.png' });
   });
 
+
+  await ok('받침대: 2줄 칸, 빈칸으로 끌어 꽂기 / 다른 타일 위에 놓으면 자리 바꾸기', async () => {
+    page.removeAllListeners('dialog');
+    await page.reload();
+    await page.click('[data-tab="local"]');
+    await page.selectOption('#ls-players', '1');
+    await page.click('#btn-local');
+    await page.waitForSelector('#s-game:not(.hidden)');
+    const rows = await page.evaluate(() => getComputedStyle(document.querySelector('#rack')).gridTemplateRows.split(' ').length);
+    assert.strictEqual(rows, 2);
+    const nSlots = await page.locator('#rack .slot').count();
+    const nTiles = await page.locator('#rack .tile').count();
+    assert.ok(nSlots >= nTiles + 2, nSlots + ' / ' + nTiles);
+    const emptyIdx = await page.evaluate(() => [...document.querySelectorAll('#rack .slot')].findIndex((s) => !s.querySelector('.tile')));
+    const firstId = await page.evaluate(() => Number(document.querySelector('#rack .slot .tile').dataset.id));
+    const target = await center(`#rack .slot[data-s="${emptyIdx}"]`);
+    await drag(tileSel(firstId, '#rack'), { x: target.x, y: target.y });
+    const now = await page.evaluate((i) => Number(document.querySelector(`#rack .slot[data-s="${i}"] .tile`).dataset.id), emptyIdx);
+    assert.strictEqual(now, firstId);
+    assert.strictEqual(await page.locator('#rack .slot[data-s="0"] .tile').count(), 0); // 원래 자리는 빈칸
+    // 자리 바꾸기
+    const a = await page.evaluate(() => Number(document.querySelector('#rack .slot[data-s="1"] .tile').dataset.id));
+    const b = await page.evaluate(() => Number(document.querySelector('#rack .slot[data-s="2"] .tile').dataset.id));
+    const t2 = await center('#rack .slot[data-s="2"]');
+    await drag(tileSel(a, '#rack'), { x: t2.x, y: t2.y });
+    const after = await page.evaluate(() => [1, 2].map((i) => Number(document.querySelector(`#rack .slot[data-s="${i}"] .tile`).dataset.id)));
+    assert.deepStrictEqual(after, [b, a]);
+    await page.screenshot({ path: OUT + '/10-rack.png' });
+  });
+
+  await ok('두 번 누르기: 첫 타일은 새 세트, 다음은 같은 세트로 + 자동 정렬', async () => {
+    const R5 = await T(0, 5), R6 = await T(0, 6), R7 = await T(0, 7), B9 = await T(1, 9), Y9 = await T(2, 9), K9 = await T(3, 9), K13 = await T(3, 13);
+    await page.evaluate((h) => window.__app.ctl._debugSetHand(0, h), [R7, R5, R6, B9, Y9, K9, K13]);
+    await page.waitForTimeout(80);
+    await page.dblclick(tileSel(R7, '#rack'));
+    let w = await getWork();
+    assert.deepStrictEqual(w.table, [[R7]]);
+    await page.dblclick(tileSel(R5, '#rack'));
+    await page.dblclick(tileSel(R6, '#rack'));
+    w = await getWork();
+    assert.deepStrictEqual(w.table, [[R5, R6, R7]]); // 숫자 순으로 자동 정렬
+    assert.strictEqual(await page.locator('.set.target').count(), 1);
+  });
+
+  await ok('두 번째 세트는 드래그로 만들고, 그 뒤 두 번 누르기는 새 세트로', async () => {
+    const B9 = await T(1, 9), Y9 = await T(2, 9), K9 = await T(3, 9);
+    const board = await center('#board');
+    await drag(tileSel(K9, '#rack'), { x: board.b.x + board.b.width - 40, y: board.b.y + board.b.height - 30 });
+    await page.dblclick(tileSel(Y9, '#rack'));
+    await page.dblclick(tileSel(B9, '#rack'));
+    const w = await getWork();
+    assert.strictEqual(w.table.length, 2);
+    assert.deepStrictEqual(w.table[1], [B9, Y9, K9]); // 그룹은 색 순
+    assert.strictEqual(await page.locator('.set[data-i="1"].target').count(), 1);
+  });
+
+  await ok('세트를 한 번 누르면 ▶ 대상이 바뀜', async () => {
+    const R8 = await T(0, 8);
+    await page.evaluate((id) => { const w = window.__app.work; }, R8);
+    const p = await center('.set[data-i="0"] .pts');
+    await page.mouse.click(p.b.x - 30 > 0 ? (await center('.set[data-i="0"]')).b.x + 4 : p.x, (await center('.set[data-i="0"]')).b.y + 4);
+    assert.strictEqual(await page.locator('.set[data-i="0"].target').count(), 1);
+  });
+
+  await ok('세트 손잡이(⠿)로 세트 순서 바꾸기 → 옮긴 세트가 ▶ 대상', async () => {
+    const before = (await getWork()).table;
+    const s0 = await center('.set[data-i="0"]');
+    await drag('.set[data-i="1"] .grip', { x: s0.b.x + 6, y: s0.y });
+    const w = await getWork();
+    assert.deepStrictEqual(w.table, [before[1], before[0]]);
+    assert.strictEqual(await page.locator('.set[data-i="0"].target').count(), 1);
+    await page.screenshot({ path: OUT + '/11-dbl-sets.png' });
+  });
+
+  await ok('이번 차례에 낸 테이블 타일을 두 번 누르면 패로 돌아옴', async () => {
+    const B9 = await T(1, 9);
+    await page.dblclick(tileSel(B9, '#board'));
+    const w = await getWork();
+    assert.ok(w.hand.includes(B9));
+    assert.ok(!w.table.flat().includes(B9));
+  });
+
+  await ok('제출 후 뽑은 타일은 빈칸에 들어가고 반짝임', async () => {
+    await page.click('#b-undo');
+    await page.waitForTimeout(1800);
+    await page.click('#b-draw');
+    await page.waitForTimeout(100);
+    assert.strictEqual(await page.locator('#rack .tile.fresh').count(), 1);
+  });
   await ok('설정 반영: 조커 없음·패 10개·첫 등록 20점 연습', async () => {
     await page.evaluate(() => window.__app.ctl.leave());
     page.removeAllListeners('dialog');

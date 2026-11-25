@@ -83,7 +83,18 @@ h3{margin:0 0 8px}
 .msg.good{color:var(--ok)}
 .ctl{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
 .ctl button{padding:8px 11px;font-size:13px}
-.rack{background:linear-gradient(var(--wood-l),var(--wood));border-radius:12px;padding:8px;min-height:calc(var(--tw)*1.38 + 16px);max-height:34vh;overflow:auto;display:flex;flex-wrap:wrap;gap:4px;align-content:flex-start}
+.rack{--cols:10;--sw:min(calc(var(--tw) + 6px),max(28px,calc((100vw - 36px) / var(--cols) - 3px)));--sh:calc((var(--sw) - 6px)*1.38 + 8px);background:linear-gradient(var(--wood-l),var(--wood));border-radius:12px;padding:8px 8px 10px;overflow-x:auto;overflow-y:hidden;display:grid;grid-template-columns:repeat(var(--cols),var(--sw));grid-template-rows:repeat(2,var(--sh));gap:8px 3px;justify-content:safe center;box-shadow:inset 0 -6px 0 rgba(0,0,0,.18)}
+.rack .tile{--tw:calc(var(--sw) - 6px)}
+.slot{border-radius:7px;background:rgba(60,30,10,.28);box-shadow:inset 0 3px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;border-bottom:3px solid rgba(255,230,190,.25)}
+.slot.drop-hover{outline:3px dashed var(--accent);outline-offset:0}
+.tile.fresh{animation:fresh 1.5s ease-out}
+@keyframes fresh{0%,40%{box-shadow:0 0 0 4px var(--accent),0 2px 0 #c9bb96;transform:translateY(-4px)}100%{box-shadow:0 2px 0 #c9bb96;transform:none}}
+.grip{cursor:grab;touch-action:none;color:rgba(255,255,255,.55);font-size:20px;line-height:1;padding:0 3px 0 0;align-self:stretch;display:flex;align-items:center;user-select:none}
+.grip:hover{color:#fff}
+.set.target{outline:3px solid var(--accent);outline-offset:3px}
+.set .tgt{position:absolute;left:8px;top:-11px;background:var(--accent);color:#2a2400;font-size:11px;font-weight:800;border-radius:9px;padding:0 7px;white-space:nowrap}
+.set.dragging{opacity:.3}
+.set.drag-ghost{transform:rotate(-2deg);background:rgba(20,48,31,.85)}
 
 /* 모달·토스트·가림막 */
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:900;padding:14px}
@@ -532,6 +543,56 @@ window.FIREBASE_CONFIG = {
     return { table: table.filter((s) => s.length > 0), hand };
   }
 
+  /**
+   * 세트 안 타일을 보기 좋게 자동 정렬 (더블클릭으로 넣을 때 사용).
+   * - 같은 색·서로 다른 숫자 → 런: 숫자 순, 빈 숫자는 조커로 채움, 남는 조커는 뒤(13을 넘으면 앞)
+   * - 같은 숫자 → 그룹: 색 순, 조커는 뒤
+   * - 진짜 타일이 1장 이하이거나 어느 쪽도 아니면: 그룹/런 어느 쪽도 아닌 경우 색·숫자 순
+   */
+  function arrangeSet(ids) {
+    const real = ids.filter((id) => !isJoker(id));
+    const jokers = ids.filter(isJoker);
+    if (real.length <= 1) return ids.slice();
+    const colors = new Set(real.map(colorOf));
+    const nums = new Set(real.map(numOf));
+    const byNum = real.slice().sort((a, b) => numOf(a) - numOf(b) || a - b);
+    if (colors.size === 1 && nums.size === real.length) {
+      const lo = numOf(byNum[0]);
+      const hi = numOf(byNum[byNum.length - 1]);
+      const gaps = hi - lo + 1 - real.length;
+      if (gaps <= jokers.length) {
+        const out = [];
+        const js = jokers.slice();
+        let k = 0;
+        for (let n = lo; n <= hi; n++) {
+          if (k < byNum.length && numOf(byNum[k]) === n) out.push(byNum[k++]);
+          else out.push(js.shift());
+        }
+        let top = hi;
+        while (js.length) {
+          if (top < 13) { out.push(js.shift()); top++; }
+          else out.unshift(js.shift());
+        }
+        return out;
+      }
+      return byNum.concat(jokers);
+    }
+    if (nums.size === 1) {
+      return real.slice().sort((a, b) => colorOf(a) - colorOf(b) || a - b).concat(jokers);
+    }
+    return real.slice().sort((a, b) => colorOf(a) - colorOf(b) || numOf(a) - numOf(b) || a - b).concat(jokers);
+  }
+
+  /** 세트 순서 바꾸기: from 번째 세트를 before 번째 세트 앞으로(before = 길이 → 맨 뒤) */
+  function moveSet(table, from, before) {
+    const t = table.map((s) => s.slice());
+    if (from < 0 || from >= t.length) return t;
+    const [s] = t.splice(from, 1);
+    const b = before > from ? before - 1 : before;
+    t.splice(Math.max(0, Math.min(b, t.length)), 0, s);
+    return t;
+  }
+
   /* ---------- 점수 ---------- */
   const handPenalty = (hand) => hand.reduce((s, id) => s + (isJoker(id) ? JOKER_PENALTY : numOf(id)), 0);
 
@@ -643,7 +704,7 @@ window.FIREBASE_CONFIG = {
     isJoker, colorOf, numOf, tileInfo, makeTile,
     createDeck, shuffle, mulberry32,
     validateSet, validateTable, validateTurn,
-    meldPointsOf, moveTile,
+    meldPointsOf, moveTile, arrangeSet, moveSet,
     handPenalty, roundScores, sortHand,
     newGame, drawAndPass, commitTurn, finishByScore,
   };
@@ -1226,7 +1287,7 @@ window.FIREBASE_CONFIG = {
   let lastSeat = null;
   let lastNotify = -1;
   let acting = false;
-  let drag = null;
+  
   let netObj = null;       // 온라인 net (Firebase 준비되면)
   let netReady = false;
 
@@ -1255,7 +1316,7 @@ window.FIREBASE_CONFIG = {
     <li>등록 후에는 테이블의 세트를 <b>쪼개고 합치고 옮겨서</b> 다시 배치할 수 있어요. 단, 차례를 끝낼 때 <b>모든 세트가 올바라야</b> 해요.</li>
     <li>낼 수 없으면 타일 1장을 뽑고 차례를 넘겨요.</li>
     <li>끝나면 남은 타일의 숫자 합(조커 30)이 감점이에요.</li>
-    <li><b>조작</b>: 타일을 끌어서(드래그) 옮겨요. 빈 곳에 놓으면 새 세트가 돼요. 초록 테두리 = 올바른 세트, 빨강 = 틀린 세트.</li></ul>
+    <li><b>조작</b>: 패의 타일을 <b>두 번 누르면</b> ▶ 표시된 세트(없으면 새 세트)로 들어가고 순서도 알아서 맞춰져요. 새 세트를 만들려면 타일을 빈 곳에 <b>끌어다 놓으세요</b>. 세트를 한 번 누르면 그 세트가 ▶ 대상이 되고, 왼쪽 ⠿ 손잡이로 세트 순서를 바꿀 수 있어요. 이번 차례에 낸 타일을 두 번 누르면 패로 돌아와요.</li><li>받침대는 2줄 칸이에요. 원하는 칸에 끌어다 꽂아 정리하세요. 초록 테두리 = 올바른 세트, 빨강 = 틀린 세트.</li></ul>
     <button id="m-close" class="primary">닫기</button>`;
   $('#modal').addEventListener('click', (e) => { if (e.target.id === 'm-close') closeModal(); });
 
@@ -1354,7 +1415,7 @@ window.FIREBASE_CONFIG = {
   }
   function goHome(msg) {
     if (unsub) unsub();
-    unsub = null; ctl = null; view = null; work = null; workKey = ''; lastSeat = null;
+    unsub = null; ctl = null; view = null; work = null; workKey = ''; lastSeat = null; slots = null; slotsFor = ''; anchor = null; press = null;
     store.del('rk_sess');
     $('#cover').classList.add('hidden');
     closeModal();
@@ -1372,12 +1433,64 @@ window.FIREBASE_CONFIG = {
     if (v.code && v.mySeat != null && !v.local) store.set('rk_sess', J({ code: v.code, seat: v.mySeat }));
   }
 
-  function mergeOrder(sh) {
-    const set = new Set(sh);
-    const kept = (work ? work.hand : []).filter((id) => set.has(id));
-    const ks = new Set(kept);
-    return kept.concat(sh.filter((id) => !ks.has(id)));
+  /* ================= 받침대(2줄 칸) ================= */
+  // slots = {cols, cells:[2*cols]} : cells[r*cols+c] = 타일 id 또는 null. 내 기기에만 저장.
+  let slots = null;
+  let slotsFor = '';
+  const localSlots = {};
+  let fresh = new Map();
+  let anchor = null;   // 더블클릭 대상 세트를 가리키는 타일 id
+  let press = null;    // 누르고 있는 중인 타일/세트
+  let lastTap = null;
+  const needCols = (n) => Math.max(10, Math.ceil((n + 3) / 2));
+  const slotKey = () => (view.local ? 'local-' + view.mySeat : 'rk_rack_' + view.code + '_' + view.mySeat);
+  function layoutSorted(list) {
+    const cols = needCols(list.length);
+    const cells = new Array(cols * 2).fill(null);
+    list.forEach((id, i) => { cells[i] = id; });
+    return { cols, cells };
   }
+  function setCols(n) {
+    const old = slots, cells = new Array(n * 2).fill(null);
+    for (let r = 0; r < 2; r++) for (let c = 0; c < Math.min(n, old.cols); c++) cells[r * n + c] = old.cells[r * old.cols + c];
+    slots = { cols: n, cells };
+  }
+  function saveSlots() {
+    if (!slots || !view) return;
+    if (view.local) localSlots[slotKey()] = JSON.parse(J(slots));
+    else store.set(slotKey(), J(slots));
+  }
+  function loadSlots() {
+    let s = null;
+    if (view.local) s = localSlots[slotKey()] || null;
+    else { try { s = JSON.parse(store.get(slotKey()) || 'null'); } catch (e) { s = null; } }
+    if (!s || !Array.isArray(s.cells) || s.cells.length !== s.cols * 2) return null;
+    const hs = new Set(work.hand);
+    const keep = s.cells.filter((id) => id != null && hs.has(id)).length;
+    return keep * 2 >= work.hand.length ? s : null; // 패가 많이 달라졌으면(새 게임) 새로 정렬
+  }
+  /** work.hand 와 칸 배치를 맞춘다. markFresh: 새로 들어온 타일을 반짝이게 */
+  function reconcile(markFresh) {
+    const hs = new Set(work.hand);
+    if (!slots) slots = layoutSorted(RK.sortHand(work.hand, 'color'));
+    const seen = new Set();
+    slots.cells = slots.cells.map((id) => (id != null && hs.has(id) && !seen.has(id) && seen.add(id) ? id : null));
+    const need = needCols(work.hand.length);
+    if (slots.cols < need) setCols(need);
+    const now = Date.now();
+    for (const id of work.hand) {
+      if (seen.has(id)) continue;
+      let k = slots.cells.indexOf(null);
+      if (k < 0) { setCols(slots.cols + 2); k = slots.cells.indexOf(null); }
+      slots.cells[k] = id;
+      if (markFresh) fresh.set(id, now + 1600);
+    }
+    while (slots.cols > need && slots.cells[slots.cols - 1] == null && slots.cells[slots.cols * 2 - 1] == null) setCols(slots.cols - 1);
+    work.hand = slots.cells.filter((id) => id != null);
+    saveSlots();
+    if (markFresh && fresh.size) setTimeout(() => { if (work) renderRack(); }, 1700);
+  }
+
   function syncWork() {
     const g = view.game;
     if (!g || view.mySeat == null) return;
@@ -1385,8 +1498,11 @@ window.FIREBASE_CONFIG = {
     const key = g.seq + '|' + J(view.myHand) + '|' + view.mySeat;
     if (key !== workKey || !work) {
       workKey = key;
-      const hand = work ? mergeOrder(view.myHand) : RK.sortHand(view.myHand, 'color');
-      work = { table: clone(g.table), hand };
+      const had = !!work && slotsFor === slotKey();
+      work = { table: clone(g.table), hand: view.myHand.slice() };
+      if (!had) { slots = loadSlots(); slotsFor = slotKey(); }
+      reconcile(had);
+      anchor = null;
       showMsg('');
     }
     // 내 차례 알림
@@ -1465,22 +1581,48 @@ window.FIREBASE_CONFIG = {
     renderBoard(); renderRack(); renderControls(); updateTimers();
   }
 
+  const lockedIds = () => new Set(view.game.table.reduce((a, s) => a.concat(s), []));
+  /** 더블클릭으로 넣을 수 있는 세트인가: 첫 등록 전에는 이번 차례에 새로 만든 세트만 */
+  function allowedSet(i, locked) {
+    if (!work.table[i]) return false;
+    if (view.game.melded[view.mySeat]) return true;
+    return !work.table[i].some((id) => locked.has(id));
+  }
+  /** 더블클릭 대상 세트 번호(-1이면 새 세트) */
+  function targetIndex() {
+    const locked = lockedIds();
+    const i = anchor == null ? -1 : work.table.findIndex((s) => s.includes(anchor));
+    if (i >= 0 && allowedSet(i, locked)) return i;
+    for (let k = work.table.length - 1; k >= 0; k--) {
+      if (!work.table[k].some((id) => locked.has(id))) return k; // 이번 차례에 만든 가장 최근 세트
+    }
+    return -1;
+  }
+
   function renderBoard() {
     const g = view.game, mine = myTurn(), dirty = isDirty();
     const recent = new Set(!dirty ? g.lastPlaced : []);
+    const ti = mine ? targetIndex() : -1;
     let h = work.table.map((s, i) => {
       const r = RK.validateSet(s);
-      const cls = r.valid ? 'ok' : (s.length < 3 ? 'wip' : 'bad');
+      const cls = (r.valid ? 'ok' : (s.length < 3 ? 'wip' : 'bad')) + (i === ti ? ' target' : '');
       const note = !r.valid && mine ? `<span class="why">${esc(r.reason)}</span>` : '';
-      return `<div class="set ${cls}" data-i="${i}">${s.map((id) => tileHTML(id, recent.has(id) ? 'recent' : '')).join('')}${r.valid ? `<span class="pts">${r.points}</span>` : ''}${note}</div>`;
+      const grip = mine ? '<span class="grip" title="끌어서 세트 순서 바꾸기">⠿</span>' : '';
+      const tgt = i === ti ? '<span class="tgt">▶ 여기에 들어가요</span>' : '';
+      return `<div class="set ${cls}" data-i="${i}">${grip}${s.map((id) => tileHTML(id, recent.has(id) ? 'recent' : '')).join('')}${r.valid ? `<span class="pts">${r.points}</span>` : ''}${tgt}${note}</div>`;
     }).join('');
-    if (!work.table.length) h += `<div class="empty">아직 테이블이 비어 있어요.${mine ? '<br>패의 타일을 이곳으로 끌어다 놓아 세트를 만드세요.' : ''}</div>`;
-    else if (mine) h += '<div class="newhint">▼ 빈 곳에 놓으면 새 세트가 만들어져요</div>';
+    if (!work.table.length) h += `<div class="empty">아직 테이블이 비어 있어요.${mine ? '<br>패의 타일을 <b>두 번 누르거나</b> 이곳으로 끌어다 놓아 세트를 만드세요.' : ''}</div>`;
+    else if (mine) h += '<div class="newhint">▼ 빈 곳에 끌어다 놓으면 새 세트 · 타일을 두 번 누르면 ▶ 표시된 세트로 들어가요</div>';
     $('#board').innerHTML = h;
     $('#board').classList.toggle('newok', mine);
   }
   function renderRack() {
-    $('#rack').innerHTML = work.hand.map((id) => tileHTML(id)).join('');
+    if (!slots) return;
+    const now = Date.now();
+    for (const [id, t] of fresh) if (t < now) fresh.delete(id);
+    const rack = $('#rack');
+    rack.style.setProperty('--cols', slots.cols);
+    rack.innerHTML = slots.cells.map((id, i) => `<div class="slot" data-s="${i}">${id != null ? tileHTML(id, fresh.has(id) ? 'fresh' : '') : ''}</div>`).join('');
   }
   function renderControls() {
     const g = view.game, mine = myTurn(), dirty = isDirty();
@@ -1535,15 +1677,22 @@ window.FIREBASE_CONFIG = {
   }
   function undo() {
     if (!myTurn() || acting) return;
-    work = { table: clone(view.game.table), hand: mergeOrder(view.myHand) };
+    work = { table: clone(view.game.table), hand: view.myHand.slice() };
+    anchor = null;
+    reconcile(false);
     showMsg(''); renderBoard(); renderRack(); renderControls();
   }
   $('#b-end').onclick = endTurn;
   $('#b-draw').onclick = drawPass;
   $('#b-undo').onclick = undo;
   $('#b-force').onclick = () => ctl.forcePass();
-  $('#b-sortc').onclick = () => { if (work) { work.hand = RK.sortHand(work.hand, 'color'); renderRack(); } };
-  $('#b-sortn').onclick = () => { if (work) { work.hand = RK.sortHand(work.hand, 'number'); renderRack(); } };
+  function sortRack(mode) {
+    if (!work) return;
+    slots = layoutSorted(RK.sortHand(work.hand, mode));
+    reconcile(false); renderRack();
+  }
+  $('#b-sortc').onclick = () => sortRack('color');
+  $('#b-sortn').onclick = () => sortRack('number');
   $('#b-menu').onclick = () => {
     const v = view;
     let h = '<h3>메뉴</h3>';
@@ -1564,7 +1713,7 @@ window.FIREBASE_CONFIG = {
   });
   $('#btn-help-home').onclick = () => openModal(HELP);
 
-  /* ================= 드래그 ================= */
+  /* ================= 누르기·두 번 누르기·드래그 ================= */
   function beforeIdIn(container, x, y) {
     const tiles = container.querySelectorAll('.tile:not(.dragging)');
     for (const t of tiles) {
@@ -1576,69 +1725,178 @@ window.FIREBASE_CONFIG = {
   function findDest(x, y) {
     const el = document.elementFromPoint(x, y);
     if (!el) return null;
-    if (el.closest('#rack')) return { type: 'hand', beforeId: beforeIdIn($('#rack'), x, y), el: $('#rack') };
+    if (el.closest('#rack')) {
+      const s = el.closest('.slot');
+      return { type: 'slot', slot: s ? Number(s.dataset.s) : -1, el: s || $('#rack') };
+    }
     if (!myTurn()) return null;
     const s = el.closest('.set');
     if (s) return { type: 'set', setIndex: Number(s.dataset.i), beforeId: beforeIdIn(s, x, y), el: s };
     if (el.closest('#board')) return { type: 'new', el: $('#board') };
     return null;
   }
+  /** 세트를 끌 때: 어느 세트 앞에 넣을지 */
+  function findSetDest(x, y) {
+    const el = document.elementFromPoint(x, y);
+    if (!el || !el.closest('#board')) return null;
+    const s = el.closest('.set');
+    if (!s) return { before: work.table.length, el: $('#board') };
+    const r = s.getBoundingClientRect();
+    const i = Number(s.dataset.i);
+    return { before: x < r.left + r.width / 2 ? i : i + 1, el: s };
+  }
   function clearHover() { document.querySelectorAll('.drop-hover').forEach((e) => e.classList.remove('drop-hover')); }
+  function refresh() { showMsg(''); renderBoard(); renderRack(); renderControls(); }
+
+  /** 패 타일 두 번 누르기: ▶ 세트(없으면 새 세트)로 넣고 자동 정렬 */
+  function quickPlace(id) {
+    if (!myTurn()) { showMsg('내 차례에만 낼 수 있어요', 'err'); return; }
+    const locked = lockedIds();
+    const ti = targetIndex();
+    const n = RK.moveTile(work, id, ti < 0 ? { type: 'new' } : { type: 'set', setIndex: ti }, locked);
+    if (!n) return;
+    const si = n.table.findIndex((s) => s.includes(id));
+    n.table[si] = RK.arrangeSet(n.table[si]);
+    work = n; anchor = id;
+    reconcile(false); refresh();
+  }
+  /** 테이블 타일 두 번 누르기: 이번 차례에 낸 타일이면 패로 되돌림 */
+  function quickReturn(id) {
+    const locked = lockedIds();
+    if (locked.has(id)) { showMsg('테이블에 원래 있던 타일은 패로 가져올 수 없어요', 'err'); return; }
+    const n = RK.moveTile(work, id, { type: 'hand' }, locked);
+    if (!n) return;
+    work = n; reconcile(false); refresh();
+  }
+  function setTarget(i) {
+    if (!myTurn() || !work.table[i]) return;
+    if (!allowedSet(i, lockedIds())) { showMsg('첫 등록 전에는 테이블에 원래 있던 세트에 넣을 수 없어요', 'err'); return; }
+    anchor = work.table[i][0];
+    renderBoard();
+  }
 
   function onDown(e) {
-    if (!work || acting || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (!work || acting || press || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (view.cover) return;
+    const grip = e.target.closest('.grip');
     const t = e.target.closest('.tile');
-    if (!t || t.classList.contains('mini')) return;
-    const inBoard = !!t.closest('#board');
-    if (inBoard && !myTurn()) return;
-    e.preventDefault();
-    const r = t.getBoundingClientRect();
-    const ghost = t.cloneNode(true);
-    ghost.classList.add('drag-ghost');
-    ghost.style.width = r.width + 'px'; ghost.style.height = r.height + 'px';
-    document.body.appendChild(ghost);
-    drag = { id: Number(t.dataset.id), el: t, ghost, dx: e.clientX - r.left, dy: e.clientY - r.top, pid: e.pointerId };
-    t.classList.add('dragging');
-    moveGhost(e.clientX, e.clientY);
+    const setEl = e.target.closest('.set');
+    let kind;
+    if (grip && setEl) { if (!myTurn()) return; kind = 'set'; }
+    else if (t) {
+      if (t.classList.contains('mini')) return;
+      if (t.closest('#board') && !myTurn()) return;
+      kind = 'tile';
+    } else if (setEl) { if (!myTurn()) return; kind = 'settap'; }
+    else return;
+    if (kind !== 'settap') e.preventDefault();
+    const el = kind === 'tile' ? t : setEl;
+    press = {
+      kind, el, x: e.clientX, y: e.clientY, started: false,
+      id: t ? Number(t.dataset.id) : null,
+      inBoard: !!(t && t.closest('#board')),
+      si: setEl ? Number(setEl.dataset.i) : null,
+    };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onCancel);
   }
+  function startDrag(e) {
+    const r = press.el.getBoundingClientRect();
+    const ghost = press.el.cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    ghost.classList.remove('target');
+    ghost.style.width = r.width + 'px'; ghost.style.height = r.height + 'px';
+    document.body.appendChild(ghost);
+    press.ghost = ghost; press.dx = press.x - r.left; press.dy = press.y - r.top;
+    press.el.classList.add('dragging');
+    press.started = true;
+    moveGhost(e.clientX, e.clientY);
+  }
   function moveGhost(x, y) {
-    drag.ghost.style.left = x - drag.dx + 'px';
-    drag.ghost.style.top = y - drag.dy + 'px';
+    press.ghost.style.left = x - press.dx + 'px';
+    press.ghost.style.top = y - press.dy + 'px';
   }
   function onMove(e) {
-    if (!drag) return;
+    if (!press) return;
+    if (!press.started) {
+      if (press.kind === 'settap') return;
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 6) return;
+      startDrag(e);
+    }
     moveGhost(e.clientX, e.clientY);
     clearHover();
-    const d = findDest(e.clientX, e.clientY);
+    const d = press.kind === 'set' ? findSetDest(e.clientX, e.clientY) : findDest(e.clientX, e.clientY);
     if (d && d.el) d.el.classList.add('drop-hover');
     const br = $('#board').getBoundingClientRect();
     if (e.clientY > br.top && e.clientY < br.top + 36) $('#board').scrollTop -= 14;
     else if (e.clientY < br.bottom && e.clientY > br.bottom - 36) $('#board').scrollTop += 14;
   }
-  function endDrag() {
+  function endPress() {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', onCancel);
-    if (drag) { drag.ghost.remove(); drag.el.classList.remove('dragging'); }
+    if (press && press.ghost) { press.ghost.remove(); press.el.classList.remove('dragging'); }
     clearHover();
+    const p = press; press = null;
+    return p;
   }
-  function onCancel() { endDrag(); drag = null; }
+  function onCancel() { endPress(); }
+  function onTap(p) {
+    if (p.kind === 'set' || p.kind === 'settap') { setTarget(p.si); return; }
+    const now = Date.now();
+    if (lastTap && lastTap.id === p.id && now - lastTap.t < 450) {
+      lastTap = null;
+      if (p.inBoard) quickReturn(p.id); else quickPlace(p.id);
+      return;
+    }
+    lastTap = { id: p.id, t: now };
+    if (p.inBoard && myTurn()) {
+      const i = work.table.findIndex((s) => s.includes(p.id));
+      if (i >= 0 && allowedSet(i, lockedIds())) { anchor = p.id; renderBoard(); }
+    }
+  }
   function onUp(e) {
-    if (!drag) return;
-    const id = drag.id;
-    const d = findDest(e.clientX, e.clientY);
-    endDrag(); drag = null;
+    if (!press) return;
+    const p = endPress();
+    if (!p.started) { onTap(p); return; }
+    if (p.kind === 'set') {
+      const d = findSetDest(e.clientX, e.clientY);
+      if (!d) return;
+      const moved = work.table[p.si];
+      work = { table: RK.moveSet(work.table, p.si, d.before), hand: work.hand };
+      anchor = moved[0];
+      refresh();
+      return;
+    }
+    dropTile(p.id, findDest(e.clientX, e.clientY));
+  }
+  function dropTile(id, d) {
     if (!d) return;
-    const locked = new Set(view.game.table.reduce((a, s) => a.concat(s), []));
-    if (d.type === 'hand' && locked.has(id)) { showMsg('테이블에 원래 있던 타일은 패로 가져올 수 없어요', 'err'); return; }
+    const locked = lockedIds();
+    if (d.type === 'slot') {
+      const inHand = work.hand.includes(id);
+      if (!inHand) {
+        if (locked.has(id)) { showMsg('테이블에 원래 있던 타일은 패로 가져올 수 없어요', 'err'); return; }
+        const n = RK.moveTile(work, id, { type: 'hand' }, locked);
+        if (!n) return;
+        work = n;
+      }
+      const cells = slots.cells;
+      const from = cells.indexOf(id);
+      if (d.slot >= 0 && d.slot !== from) {
+        const occ = cells[d.slot];
+        if (from >= 0) cells[from] = occ;          // 패 안에서 옮기기: 자리 바꾸기
+        else if (occ != null) cells[cells.indexOf(null)] = occ; // 테이블에서 가져오기: 있던 타일은 빈칸으로
+        cells[d.slot] = id;
+      }
+      reconcile(false); refresh();
+      return;
+    }
     const n = RK.moveTile(work, id, { type: d.type, setIndex: d.setIndex, beforeId: d.beforeId }, locked);
     if (!n) return;
-    work = n;
-    showMsg('');
-    renderBoard(); renderRack(); renderControls();
+    work = n; anchor = id;
+    reconcile(false); refresh();
   }
   $('#board').addEventListener('pointerdown', onDown);
   $('#rack').addEventListener('pointerdown', onDown);

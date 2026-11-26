@@ -37,6 +37,10 @@
       turnSec: pick(x.turnSec, [0, 60, 90, 120], 90),
       totalMin: pick(x.totalMin, [0, 20, 30, 40], 30),
       aiLevel: pick(x.aiLevel, [1, 2, 3], 2),
+      timeoutDraw: pick(x.timeoutDraw, [1, 3], 1),   // 시간 안에 정리를 못 끝내면 뽑을 장수(공식 3장)
+      autoSubmit: pick(x.autoSubmit, [0, 1], 1),     // 시간이 끝날 때 테이블이 올바르면 자동 제출
+      hints: pick(x.hints, [0, 3, 99], 3),           // 한 판에 쓸 수 있는 힌트 수(99 = 무제한)
+      reactions: pick(x.reactions, [0, 1], 1),       // 반응 버튼
     };
   }
   /** 컴퓨터가 '생각하는' 시간(1.5~3초) */
@@ -83,6 +87,8 @@
         myHand: myHandStr ? P(myHandStr) : [],
         game: null,
         pool: null,
+        history: room.historyJson ? P(room.historyJson) : [],
+        react: room.react || null,
       };
       if (room.game && room.poolJson) {
         const g = room.game;
@@ -104,6 +110,8 @@
           endReason: g.endReason,
           scores: P(g.scoresJson),
           finalHands: P(g.finalHandsJson),
+          firstDraw: g.firstDrawJson ? P(g.firstDrawJson) : null,
+          gameId: g.gameId || '',
         };
       }
       return v;
@@ -282,7 +290,8 @@
       if (!v.isHost || v.status !== 'lobby') throw new Error('방장만 시작할 수 있어요');
       const st = v.settings;
       if (v.seats.filter(Boolean).length !== st.players) throw new Error('모든 자리가 차야 시작할 수 있어요');
-      const g = RK.newGame({ players: st.players, minMeld: st.minMeld, jokers: st.jokers, handSize: st.handSize });
+      const first = RK.drawForFirst(st.players, Math.random);
+      const g = RK.newGame({ players: st.players, minMeld: st.minMeld, jokers: st.jokers, handSize: st.handSize, first: first.first });
       const t = now();
       const upd = {};
       upd[base() + '/poolJson'] = J(g.pool);
@@ -291,7 +300,9 @@
       });
       upd[base() + '/game'] = {
         seq: 1,
-        turn: Math.floor(Math.random() * st.players),
+        turn: first.first,
+        firstDrawJson: J(first.tiles),
+        gameId: Math.random().toString(36).slice(2, 10),
         turnStartedAt: t,
         endsAt: st.totalMin ? t + st.totalMin * 60000 : 0,
         tableJson: '[]',
@@ -426,24 +437,26 @@
       upd[handPath(seat_)] = J(hand);
       if (over) upd[base() + '/meta/status'] = 'over';
       await fb.update('', upd);
+      if (over) await appendHistory(over.scores, seat_, 'empty');
       return { ok: true };
     }
 
     /** target 자리의 차례를 "1장 뽑고 넘김"으로 처리 (본인 또는 대신 넘겨주는 사람이 호출) */
-    async function passFor(target) {
+    async function passFor(target, nDraw) {
       const v = buildView();
       const g = v.game;
       if (!g || v.status !== 'playing' || g.turn !== target) return { ok: false, message: '지금은 그 사람의 차례가 아니에요' };
       const st = v.settings;
       const pool = v.pool;
-      const drawId = g.poolPos < pool.length ? pool[g.poolPos] : null;
+      const drawn = pool.slice(g.poolPos, g.poolPos + (nDraw || 1));
+      const drawId = drawn.length ? drawn[0] : null;
       let hand;
       if (target === seat) hand = v.myHand.slice();
       else {
         const s = await fb.get(handPath(target));
         hand = s ? P(s) : [];
       }
-      const newHand = drawId !== null ? hand.concat([drawId]) : hand;
+      const newHand = hand.concat(drawn);
       let over = null;
       if (drawId === null && g.passes + 1 >= st.players) {
         const hands = await readAllHands(st.players, target, newHand);
@@ -451,7 +464,7 @@
         over = { winner: fin.winner, scores: RK.roundScores(hands, fin.winner), hands };
       }
       const counts = g.counts.slice();
-      if (drawId !== null) counts[target] += 1;
+      counts[target] += drawn.length;
       const t = now();
       const prevHand = myHandStr;
       if (target === seat && drawId !== null) myHandStr = J(newHand);
@@ -461,7 +474,7 @@
           seq: cur.seq + 1,
           countsJson: J(counts),
           lastPlacedJson: '[]',
-          poolPos: cur.poolPos + (drawId !== null ? 1 : 0),
+          poolPos: cur.poolPos + drawn.length,
           passes: drawId !== null ? 0 : cur.passes + 1,
         });
         if (over) {
@@ -484,7 +497,36 @@
       if (drawId !== null) upd[handPath(target)] = J(newHand);
       if (over) upd[base() + '/meta/status'] = 'over';
       if (Object.keys(upd).length) await fb.update('', upd);
-      return { ok: true, drew: drawId !== null };
+      if (over) await appendHistory(over.scores, over.winner, 'stalemate');
+      return { ok: true, drew: drawn.length, drawn: target === seat ? drawn : null };
+    }
+
+    /** 누적 점수표에 한 판 결과 추가 (이름 기준으로 모음) */
+    async function appendHistory(scores, winner, reason) {
+      const v = buildView();
+      const names = v.seats.map((x) => (x ? x.name : '?'));
+      const bots = v.seats.map((x) => !!(x && x.bot));
+      const entry = { n: names, b: bots, s: scores, w: winner, r: reason };
+      try {
+        await fb.transaction(base() + '/historyJson', (cur) => {
+          const arr = cur ? P(cur) : [];
+          arr.push(entry);
+          return J(arr.slice(-60));
+        });
+      } catch (e) {}
+    }
+    async function resetHistory() {
+      const v = buildView();
+      if (!v.isHost) return;
+      await fb.set(base() + '/historyJson', null);
+    }
+    let lastReact = 0;
+    async function react(e) {
+      const v = buildView();
+      if (!v.settings || !v.settings.reactions || seat == null || v.status !== 'playing') return;
+      if (now() - lastReact < 1500) return;
+      lastReact = now();
+      await fb.set(base() + '/react', { s: seat, e: String(e).slice(0, 4), t: now() });
     }
 
     /** 시간 종료/방장 종료: 감점이 가장 낮은 사람이 승리 */
@@ -510,7 +552,26 @@
       const upd = {};
       upd[base() + '/meta/status'] = 'over';
       await fb.update('', upd);
+      await appendHistory(scores, fin.winner, reason);
       return { ok: true };
+    }
+
+    /**
+     * 내 차례 시간이 끝났을 때
+     * - 자동 제출이 켜져 있고, 지금 테이블이 올바르면 그대로 제출
+     * - 무언가 옮기다가 못 끝냈으면 원상복구 + 벌칙 장수(설정, 공식 3장), 아무것도 안 했으면 1장
+     */
+    async function myTimeout() {
+      const v = buildView();
+      const w = o.getWork ? o.getWork() : null;
+      const dirty = !!(w && w.dirty);
+      if (dirty && v.settings.autoSubmit) {
+        const r = await commitFor(seat, w.table, w.hand);
+        if (r.ok) return Object.assign(r, { auto: 'submitted' });
+      }
+      const n = dirty ? v.settings.timeoutDraw : 1;
+      const r = await passFor(seat, n);
+      return Object.assign(r, { auto: dirty ? 'penalty' : 'draw' });
     }
 
     /** 컴퓨터 차례: 수를 계산해 두고, 낼 수 없으면 뽑고 넘김 */
@@ -553,24 +614,25 @@
         if (seat === lowest(-1) && t >= g.turnStartedAt + thinkMs(g.seq)) job = () => runAI(g.turn);
       } else if (st.turnSec > 0) {
         const dl = g.turnStartedAt + st.turnSec * 1000;
-        if (g.turn === seat && t >= dl) job = () => passFor(seat);
+        if (g.turn === seat && t >= dl) job = () => myTimeout();
         else if (g.turn !== seat && t >= dl + GRACE_MS && seat === lowest(g.turn)) job = () => passFor(g.turn);
       }
       if (job) {
         busy = true;
         Promise.resolve(job())
           .catch(() => {})
-          .then(() => {
+          .then((r) => {
             busy = false;
+            if (r && r.auto && api.onAuto) api.onAuto(r);
           });
       }
     }
 
-    return {
+    const api = {
       createRoom, joinRoom, resume, leave,
       updateSettings, kick, startGame, rematch,
       commit: (table, hand) => commitFor(seat, table, hand),
-      addBot, fillBots, takeoverOffline,
+      addBot, fillBots, takeoverOffline, resetHistory, react,
       drawPass: () => passFor(seat),
       forcePass: () => {
         const v = buildView();
@@ -582,6 +644,7 @@
       },
       tick,
       now,
+      onAuto: null,
       getView: buildView,
       subscribe: (f) => {
         subs.add(f);
@@ -590,6 +653,7 @@
       get code() { return code; },
       get seat() { return seat; },
     };
+    return api;
   }
 
   return { createNet, sanitizeSettings, thinkMs };

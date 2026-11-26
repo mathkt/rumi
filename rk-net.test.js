@@ -25,7 +25,9 @@ function world() {
   const db = makeFakeDB();
   const mk = (cid) => {
     const fb = db.client();
-    return { fb, net: createNet(fb, RK, { cid, now: clock, AI }) };
+    const me = { fb, work: null };
+    me.net = createNet(fb, RK, { cid, now: clock, AI, getWork: () => me.work });
+    return me;
   };
   return { db, mk };
 }
@@ -450,6 +452,104 @@ test('컴퓨터만 남기고 방장이 대기실에서 나가면 방 삭제', as
 
 test('생각 시간은 1.5~3초', () => {
   for (let i = 0; i < 50; i++) { const t = thinkMs(i); assert.ok(t >= 1500 && t < 3000); }
+});
+
+
+test('선 정하기: 시작 차례 = 뽑은 숫자가 가장 높은 사람, 모두에게 공개', async () => {
+  const { cs } = await fullRoom();
+  await cs[0].net.startGame(); await flush();
+  const g = cs[2].net.getView().game;
+  assert.strictEqual(g.firstDraw.length, 4);
+  const first = g.firstDraw.map((t) => RK.numOf(t[0]));
+  assert.strictEqual(first[g.turn], Math.max(...first));
+  assert.ok(g.gameId && g.gameId.length > 4);
+});
+
+test('시간 끝: 옮기다 못 끝내면 원상복구 + 벌칙 3장(설정), 자동 제출 꺼짐', async () => {
+  const { w, cs, code } = await fullRoom({ timeoutDraw: 3, autoSubmit: 0, turnSec: 60, totalMin: 0 });
+  await cs[0].net.startGame(); await flush();
+  const me = byTurn(cs);
+  const seen = [];
+  me.net.onAuto = (r) => seen.push(r.auto);
+  const hand = [T(R, 10), T(B, 10), T(Y, 10), T(K, 1)];
+  w.db.setRaw('rummikub/hands/' + code + '/' + me.net.seat, J(hand)); await flush();
+  me.work = { dirty: true, table: [[T(R, 10), T(B, 10)]], hand: [T(Y, 10), T(K, 1)] };
+  clockNow += 61000; me.net.tick(); await flush(); await flush();
+  const v = me.net.getView();
+  assert.strictEqual(v.myHand.length, 7);
+  assert.deepStrictEqual(v.game.table, []);
+  assert.deepStrictEqual(seen, ['penalty']);
+});
+
+test('시간 끝: 아무것도 안 했으면 1장만', async () => {
+  const { cs } = await fullRoom({ timeoutDraw: 3, turnSec: 60, totalMin: 0 });
+  await cs[0].net.startGame(); await flush();
+  const me = byTurn(cs);
+  me.work = { dirty: false };
+  clockNow += 61000; me.net.tick(); await flush(); await flush();
+  assert.strictEqual(me.net.getView().myHand.length, 15);
+});
+
+test('시간 끝: 자동 제출 켜짐 + 테이블이 올바르면 그대로 제출', async () => {
+  const { w, cs, code } = await fullRoom({ autoSubmit: 1, turnSec: 60, totalMin: 0 });
+  await cs[0].net.startGame(); await flush();
+  const me = byTurn(cs);
+  const seen = [];
+  me.net.onAuto = (r) => seen.push(r.auto);
+  const hand = [T(R, 10), T(B, 10), T(Y, 10), T(K, 1)];
+  w.db.setRaw('rummikub/hands/' + code + '/' + me.net.seat, J(hand)); await flush();
+  me.work = { dirty: true, table: [[T(R, 10), T(B, 10), T(Y, 10)]], hand: [T(K, 1)] };
+  clockNow += 61000; me.net.tick(); await flush(); await flush();
+  const v = me.net.getView();
+  assert.deepStrictEqual(v.myHand, [T(K, 1)]);
+  assert.strictEqual(v.game.table.length, 1);
+  assert.deepStrictEqual(seen, ['submitted']);
+});
+
+test('누적 점수표: 판마다 쌓이고 다시 하기에도 유지, 방장이 초기화', async () => {
+  const { w, cs, code } = await fullRoom({ players: 2 });
+  for (let k = 0; k < 2; k++) {
+    await cs[0].net.startGame(); await flush();
+    const me = byTurn(cs);
+    const set = [T(R, 11), T(B, 11), T(Y, 11)];
+    w.db.setRaw('rummikub/hands/' + code + '/' + me.net.seat, J(set)); await flush();
+    await me.net.commit([set], []); await flush(); await flush();
+    assert.strictEqual(cs[1].net.getView().history.length, k + 1);
+    await cs[0].net.rematch(); await flush();
+  }
+  const h = cs[1].net.getView().history;
+  assert.strictEqual(h.length, 2);
+  assert.deepStrictEqual(h[0].n, ['선생님', '가']);
+  h.forEach((e) => assert.strictEqual(e.s.reduce((a, b) => a + b, 0), 0));
+  await cs[1].net.resetHistory(); await flush();
+  assert.strictEqual(cs[0].net.getView().history.length, 2);
+  await cs[0].net.resetHistory(); await flush();
+  assert.strictEqual(cs[1].net.getView().history.length, 0);
+});
+
+test('방장 끝내기·교착도 점수표에 기록', async () => {
+  const { cs } = await fullRoom({ players: 2 });
+  await cs[0].net.startGame(); await flush();
+  await cs[0].net.endGame(); await flush(); await flush();
+  const h = cs[1].net.getView().history;
+  assert.strictEqual(h.length, 1);
+  assert.strictEqual(h[0].r, 'host');
+});
+
+test('반응: 모두에게 보이고, 너무 자주 못 보냄, 설정으로 끄기', async () => {
+  const { cs } = await fullRoom({ players: 2 });
+  await cs[0].net.startGame(); await flush();
+  await cs[1].net.react('👍'); await flush();
+  assert.deepStrictEqual([cs[0].net.getView().react.s, cs[0].net.getView().react.e], [1, '👍']);
+  await cs[1].net.react('🎉'); await flush();
+  assert.strictEqual(cs[0].net.getView().react.e, '👍'); // 1.5초 안에는 무시
+  clockNow += 2000;
+  await cs[1].net.react('🎉'); await flush();
+  assert.strictEqual(cs[0].net.getView().react.e, '🎉');
+  const r2 = await fullRoom({ players: 2, reactions: 0 });
+  await r2.cs[0].net.startGame(); await flush();
+  await r2.cs[1].net.react('👍'); await flush();
+  assert.strictEqual(r2.cs[0].net.getView().react, null);
 });
 
 (async () => {

@@ -388,6 +388,41 @@ test('moveSet: 앞으로·뒤로·맨 뒤로', () => {
   assert.deepStrictEqual(t, [[1], [2], [3], [4]]);
 });
 
+
+/* ----- 공식 정산·벌칙·선 정하기 ----- */
+test('정산(공식): 승자에게도 타일이 남으면 차이만큼만 잃음', () => {
+  const hands = [[T(R, 2)], [T(R, 9)], [T(R, 5)], [T(R, 1), T(R, 1, 1)]];
+  // 승자 = 0번(2점). 1번 9-2=7, 2번 5-2=3, 3번 2-2=0
+  assert.deepStrictEqual(RK.roundScores(hands, 0), [10, -7, -3, 0]);
+});
+test('정산(공식): 패를 비운 승자는 기존 방식과 같음', () => {
+  assert.deepStrictEqual(RK.roundScores([[], [T(R, 5)], [J1]], 0), [35, -5, -30]);
+});
+test('벌칙: 3장 뽑고 넘기기, 더미가 모자라면 있는 만큼', () => {
+  let g = RK.newGame({ seed: 3 });
+  const r = RK.drawAndPass(g, 3);
+  assert.strictEqual(r.state.hands[0].length, 17);
+  assert.strictEqual(r.state.pool.length, 47);
+  g = r.state; g.pool = g.pool.slice(0, 2);
+  const r2 = RK.drawAndPass(g, 3);
+  assert.strictEqual(r2.state.hands[1].length, 16);
+});
+test('선 정하기: 가장 높은 숫자가 먼저, 동점이면 동점자끼리 다시', () => {
+  for (let seed = 1; seed < 60; seed++) {
+    const f = RK.drawForFirst(4, RK.mulberry32(seed));
+    const firstRound = f.tiles.map((t) => RK.numOf(t[0]));
+    const max = Math.max(...firstRound);
+    assert.strictEqual(firstRound[f.first], max);
+    assert.ok(f.tiles.flat().every((id) => !RK.isJoker(id)));
+    const tied = firstRound.filter((n) => n === max).length;
+    if (tied === 1) assert.ok(f.tiles.every((t) => t.length === 1));
+    else assert.ok(f.tiles[f.first].length >= 2);
+  }
+});
+test('newGame: first 옵션으로 시작 차례', () => {
+  assert.strictEqual(RK.newGame({ seed: 1, first: 2 }).turn, 2);
+});
+
 /* ----- 결과 ----- */
 console.log(`통과 ${passed}개 / 실패 ${failed.length}개`);
 failed.forEach(([n, m]) => console.log('  ✗', n, '→', m));

@@ -29,7 +29,7 @@ const server = http.createServer((req, res) => {
     const ctx = await browser.newContext({ viewport: { width: 1000, height: 760 } });
     const page = await ctx.newPage();
     page.on('pageerror', (e) => errors.push(label + ' pageerror: ' + e.message));
-    page.on('console', (m) => { if (m.type() === 'error') errors.push(label + ' console: ' + m.text()); });
+    page.on('console', (m) => { if (m.type() === 'error' && !/ERR_TUNNEL|ERR_NAME/.test(m.text())) errors.push(label + ' console: ' + m.text()); });
     const client = db.client();
     const unsubs = {};
     await page.exposeFunction('__db_get', async (p) => db.getAt(p));
@@ -270,7 +270,7 @@ const server = http.createServer((req, res) => {
     await D.page.click('#btn-create');
     await D.page.waitForSelector('#s-lobby:not(.hidden)');
     await D.page.click('[data-bot="1"]');
-    await D.page.waitForFunction(() => document.querySelector('#lb-seats').textContent.includes('🤖 컴퓨터2'));
+    await D.page.waitForFunction(() => document.querySelector('#lb-seats').textContent.includes('컴퓨터2'));
     assert.ok(await D.page.locator('#lb-start').isDisabled());
     await D.page.click('[data-bot="2"]');
     await D.page.waitForFunction(() => !document.querySelector('#lb-start').disabled);

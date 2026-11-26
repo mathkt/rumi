@@ -335,11 +335,35 @@
   /* ---------- 점수 ---------- */
   const handPenalty = (hand) => hand.reduce((s, id) => s + (isJoker(id) ? JOKER_PENALTY : numOf(id)), 0);
 
-  /** 승자는 +(다른 사람 감점 합), 나머지는 -(자기 감점) */
+  /**
+   * 점수 정산(공식 규칙)
+   * - 승자가 패를 다 비웠으면: 나머지는 -(자기 남은 타일 합), 승자는 +(그 합계)
+   * - 더미가 바닥나거나 시간이 끝나 승자에게도 타일이 남았으면: 나머지는 -(자기 합 - 승자 합), 승자는 +(그 합계)
+   * 언제나 점수의 합은 0
+   */
   function roundScores(hands, winner) {
     const pen = hands.map(handPenalty);
-    const total = pen.reduce((a, b) => a + b, 0) - pen[winner];
-    return pen.map((p, i) => (i === winner ? total : -p));
+    const base = pen[winner];
+    const loss = pen.map((p, i) => (i === winner ? 0 : Math.max(0, p - base)));
+    const total = loss.reduce((a, b) => a + b, 0);
+    return loss.map((l, i) => (i === winner ? total : l ? -l : 0));
+  }
+
+  /**
+   * 선 정하기: 모두 한 장씩 뽑아 숫자가 가장 높은 사람이 먼저(조커 제외). 동점이면 동점자끼리 다시 뽑기.
+   * 반환: {tiles: [[첫 장, (다시 뽑은 장)...] ...자리별], first}
+   */
+  function drawForFirst(players, rng) {
+    const deck = shuffle(createDeck(0), rng);
+    const tiles = [];
+    for (let i = 0; i < players; i++) tiles.push([]);
+    let contenders = tiles.map((_, i) => i);
+    for (let round = 0; round < 6 && contenders.length > 1; round++) {
+      contenders.forEach((i) => tiles[i].push(deck.pop()));
+      const best = Math.max(...contenders.map((i) => numOf(tiles[i][tiles[i].length - 1])));
+      contenders = contenders.filter((i) => numOf(tiles[i][tiles[i].length - 1]) === best);
+    }
+    return { tiles, first: contenders[0] };
   }
 
   /* ---------- 패 정렬 ---------- */
@@ -371,7 +395,7 @@
       hands,
       pool: deck,
       table: [],
-      turn: 0,
+      turn: o.first == null ? 0 : o.first,
       melded: new Array(players).fill(false),
       passes: 0, // 더미가 빈 뒤 연속으로 넘긴 횟수
       over: false,
@@ -382,12 +406,12 @@
 
   const nextTurn = (s) => (s.turn + 1) % s.players;
 
-  /** 낼 수 없을 때: 1장 뽑고 차례 넘김(더미가 비었으면 그냥 넘김) */
-  function drawAndPass(state) {
+  /** 낼 수 없을 때: n장(기본 1장) 뽑고 차례 넘김(더미가 비었으면 그냥 넘김) */
+  function drawAndPass(state, n) {
     if (state.over) return { ok: false, code: 'OVER', message: '이미 끝난 게임이에요' };
     const s = clone(state);
     if (s.pool.length > 0) {
-      s.hands[s.turn].push(s.pool.shift());
+      for (let k = 0; k < (n || 1) && s.pool.length > 0; k++) s.hands[s.turn].push(s.pool.shift());
       s.passes = 0;
     } else {
       s.passes += 1;
@@ -444,7 +468,7 @@
     createDeck, shuffle, mulberry32,
     validateSet, validateTable, validateTurn,
     meldPointsOf, moveTile, arrangeSet, moveSet,
-    handPenalty, roundScores, sortHand,
+    handPenalty, roundScores, sortHand, drawForFirst,
     newGame, drawAndPass, commitTurn, finishByScore,
   };
 });
